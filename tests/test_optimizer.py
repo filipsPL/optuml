@@ -16,7 +16,7 @@ def test_optimizer_accuracy(binary_classification_data, algorithm):
     X_train, X_test, y_train, y_test = binary_classification_data
 
     # Initialize Optimizer with accuracy optimization
-    optimizer = Optimizer(algorithm=algorithm, direction="maximize", verbose=False, n_trials=10, cv=3, scoring="accuracy", random_state=42)
+    optimizer = Optimizer(algorithm=algorithm, direction="maximize", verbose=False, n_trials=10, cv=2, scoring="accuracy", random_state=42)
     
     # Fit the model
     optimizer.fit(X_train, y_train)
@@ -40,7 +40,7 @@ def test_optimizer_roc_auc(binary_classification_data, algorithm):
     X_train, X_test, y_train, y_test = binary_classification_data
 
     # Initialize Optimizer with ROC AUC optimization
-    optimizer = Optimizer(algorithm=algorithm, direction="maximize", verbose=False, n_trials=10, cv=3, scoring="roc_auc", random_state=42)
+    optimizer = Optimizer(algorithm=algorithm, direction="maximize", verbose=False, n_trials=10, cv=2, scoring="roc_auc", random_state=42)
     
     # Fit the model
     optimizer.fit(X_train, y_train)
@@ -63,7 +63,7 @@ def test_optimizer_direction_minimize(binary_classification_data):
     X_train, X_test, y_train, y_test = binary_classification_data
 
     # Initialize Optimizer to minimize accuracy (artificial test, not practical)
-    optimizer = Optimizer(algorithm="SVM", direction="minimize", verbose=False, n_trials=10, cv=3, scoring="accuracy", random_state=42)
+    optimizer = Optimizer(algorithm="SVM", direction="minimize", verbose=False, n_trials=10, cv=2, scoring="accuracy", random_state=42)
     
     # Fit the model
     optimizer.fit(X_train, y_train)

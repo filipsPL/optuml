@@ -13,8 +13,10 @@
   - [Quick start](#quick-start)
   - [Features](#features)
   - [Installation](#installation)
-    - [Prerequisites](#prerequisites)
-    - [Installation](#installation-1)
+    - [pip](#pip)
+    - [Manual way](#manual-way)
+      - [Prerequisites](#prerequisites)
+      - [Installation](#installation-1)
   - [Usage](#usage)
     - [Basic Example](#basic-example)
     - [Available Algorithms](#available-algorithms)
@@ -64,7 +66,14 @@ y_pred = optimizer.predict(X_test)
 
 ## Installation
 
-### Prerequisites
+### pip
+
+`pip install -i https://test.pypi.org/simple/ optuml` (test pypi as for now)
+
+
+### Manual way
+
+#### Prerequisites
 
 Ensure that the following Python packages are installed:
 
@@ -80,7 +89,7 @@ You can install the required packages via `pip`:
 pip install optuna scikit-learn catboost xgboost numpy
 ```
 
-### Installation
+#### Installation
 
 Just fetch the `optuml.py` [file from the repo](optuml/optuml.py) and put it in the directory with your script.
 

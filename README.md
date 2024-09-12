@@ -7,7 +7,7 @@
 
 `OptuML` (for *Optu*na and *ML*) is a Python module that provides hyperparameter optimization for several machine learning algorithms using the [Optuna](https://optuna.org/) framework. The module supports a variety of algorithms and allows easy hyperparameter tuning through a scikit-learn-like API.
 
-[![Python tests](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml)
+[![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml)
 
 - [OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms using Optuna](#optuml-hyperparameter-optimization-for-multiple-machine-learning-algorithms-using-optuna)
   - [Quick start](#quick-start)
@@ -154,7 +154,7 @@ algorithms = ['SVM', 'kNN', 'RandomForest', 'CatBoost', 'XGBoost', 'LogisticRegr
 
 for algorithm in algorithms:
     print(f"Optimizing {algorithm}")
-    optimizer = Optimizer(algorithm=algorithm, n_trials=50, cv=3, scoring="accuracy", verbose=False, random_state=42)
+    optimizer = Optimizer(algorithm=algorithm, n_trials=50, cv=3, scoring="accuracy", verbose=False)
     optimizer.fit(X_train, y_train)
     
     # Predict and calculate accuracy
@@ -171,7 +171,7 @@ You can also optimize for different scoring metrics like ROC AUC or use the `dir
 
 ```python
 # Instantiate the optimizer for RandomForest with ROC AUC optimization
-optimizer = Optimizer(algorithm="RandomForest", n_trials=50, cv=3, scoring="roc_auc", direction="maximize", verbose=True, random_state=42)
+optimizer = Optimizer(algorithm="RandomForest", n_trials=50, cv=3, scoring="roc_auc", direction="maximize", verbose=True)
 
 # Fit the optimizer to the training data
 optimizer.fit(X_train, y_train)

@@ -82,7 +82,7 @@ pip install optuna scikit-learn catboost xgboost numpy
 
 ### Installation
 
-Just fetch the `optuml.py` [file from the repo](optuml.py) and put it in the directory with your script.
+Just fetch the `optuml.py` [file from the repo](optuml/optuml.py) and put it in the directory with your script.
 
 
 ## Usage

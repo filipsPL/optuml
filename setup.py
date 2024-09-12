@@ -23,6 +23,7 @@ setup(
         "optuna",
         "scikit-learn",
         "catboost",
+        "graphviz",
         "xgboost",
         "numpy"
     ],

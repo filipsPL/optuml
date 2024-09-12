@@ -4,8 +4,8 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="optuml",  # The name of your package on PyPI
-    version="0.1.1",  # Start with 0.1.0 for the initial release
+    name="optuml",
+    version="0.1.4",
     author="Filip S.",
     author_email="filip.ursynow@gmail.com",
     description="Hyperparameter optimization for multiple machine learning algorithms using Optuna, with Scikit-learn API",
@@ -20,10 +20,10 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
-        "optuna",
+        "optuna>=3.0.1",
         "scikit-learn",
         "catboost",
-        "graphviz",
+        "graphviz",   # Needed for CatBoost
         "xgboost",
         "numpy"
     ],

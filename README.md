@@ -4,6 +4,43 @@
 
 [![Python tests](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml)
 
+- [OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms using Optuna](#optuml-hyperparameter-optimization-for-multiple-machine-learning-algorithms-using-optuna)
+  - [Quick start](#quick-start)
+  - [Features](#features)
+  - [Installation](#installation)
+    - [Prerequisites](#prerequisites)
+    - [Installation](#installation-1)
+  - [Usage](#usage)
+    - [Basic Example](#basic-example)
+    - [Available Algorithms](#available-algorithms)
+    - [Example of Optimizing Different Algorithms](#example-of-optimizing-different-algorithms)
+    - [Custom Scoring and Direction](#custom-scoring-and-direction)
+    - [Controlling Verbosity](#controlling-verbosity)
+  - [API Reference](#api-reference)
+    - [`Optimizer`](#optimizer)
+      - [Parameters:](#parameters)
+      - [Methods:](#methods)
+  - [Contributing](#contributing)
+  - [Running Tests](#running-tests)
+  - [Contact](#contact)
+
+
+## Quick start
+
+```python
+from OptuML import Optimizer
+
+# Instantiate the optimizer for SVM
+optimizer = Optimizer(algorithm="SVM", n_trials=50, cv=3, scoring="accuracy", verbose=True)
+
+# Fit the optimizer to the training data
+optimizer.fit(X_train, y_train)
+
+# Predict on the test set
+y_pred = optimizer.predict(X_test)
+```
+
+
 ## Features
 
 - **Multiple Algorithms**: Supports hyperparameter optimization for the following algorithms:
@@ -181,6 +218,6 @@ pip install pytest
 pytest
 ```
 
-### Contact
+## Contact
 
 If you have any questions or feedback, feel free to open an issue on GitHub.

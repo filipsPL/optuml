@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="optuml",  # The name of your package on PyPI
-    version="0.1.0",  # Start with 0.1.0 for the initial release
+    version="0.1.1",  # Start with 0.1.0 for the initial release
     author="Filip S.",
     author_email="filip.ursynow@gmail.com",
     description="Hyperparameter optimization for multiple machine learning algorithms using Optuna, with Scikit-learn API",
@@ -18,7 +18,7 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.6",
+    python_requires=">=3.8",
     install_requires=[
         "optuna",
         "scikit-learn",

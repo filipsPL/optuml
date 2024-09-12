@@ -13,8 +13,8 @@
   - [Quick start](#quick-start)
   - [Features](#features)
   - [Installation](#installation)
-    - [pip](#pip)
-    - [Manual way](#manual-way)
+    - [a) pip](#a-pip)
+    - [b) Manual way](#b-manual-way)
       - [Prerequisites](#prerequisites)
       - [Installation](#installation-1)
   - [Usage](#usage)
@@ -66,12 +66,12 @@ y_pred = optimizer.predict(X_test)
 
 ## Installation
 
-### pip
+### a) pip
 
 `pip install -i https://test.pypi.org/simple/ optuml` (test pypi as for now)
 
 
-### Manual way
+### b) Manual way
 
 #### Prerequisites
 

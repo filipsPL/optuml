@@ -7,9 +7,11 @@ on:
       - '.github/workflows/python-package.yml'
     branches:
       - main
+      - devel
   pull_request:
     branches:
       - main
+      - devel
 
 jobs:
   test:

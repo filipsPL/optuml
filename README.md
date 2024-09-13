@@ -1,4 +1,5 @@
-# OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms using Optuna
+OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms using Optuna
+=============================
 
 ```
   ⣰⡁ ⡀⣀ ⢀⡀ ⣀⣀    ⡎⢱ ⣀⡀ ⣰⡀ ⡀⢀ ⡷⢾ ⡇    ⠄ ⣀⣀  ⣀⡀ ⢀⡀ ⡀⣀ ⣰⡀   ⡎⢱ ⣀⡀ ⣰⡀ ⠄ ⣀⣀  ⠄ ⣀⣀ ⢀⡀ ⡀⣀
@@ -9,59 +10,16 @@
 
 [![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml)
 
-- [OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms using Optuna](#optuml-hyperparameter-optimization-for-multiple-machine-learning-algorithms-using-optuna)
-  - [Quick start](#quick-start)
-  - [Features](#features)
-  - [Installation](#installation)
-    - [a) pip](#a-pip)
-    - [b) Manual way](#b-manual-way)
-      - [Prerequisites](#prerequisites)
-      - [Installation](#installation-1)
-  - [Usage](#usage)
-    - [Basic Example](#basic-example)
-    - [Available Algorithms](#available-algorithms)
-    - [Example of Optimizing Different Algorithms](#example-of-optimizing-different-algorithms)
-    - [Custom Scoring and Direction](#custom-scoring-and-direction)
-    - [Controlling Verbosity](#controlling-verbosity)
-  - [API Reference](#api-reference)
-    - [`Optimizer`](#optimizer)
-      - [Parameters:](#parameters)
-      - [Methods:](#methods)
-  - [Contributing](#contributing)
-  - [Running Tests](#running-tests)
-  - [Contact](#contact)
-
-
-## Quick start
-
-```python
-from OptuML import Optimizer
-
-# Instantiate the optimizer for SVM
-optimizer = Optimizer(algorithm="SVM", n_trials=50, cv=3, scoring="accuracy", verbose=True)
-
-# Fit the optimizer to the training data
-optimizer.fit(X_train, y_train)
-
-# Predict on the test set
-y_pred = optimizer.predict(X_test)
-```
-
-
 ## Features
 
 - **Multiple Algorithms**: Supports hyperparameter optimization for the following algorithms:
-  - Support Vector Machine (SVM)
-  - k-Nearest Neighbors (kNN)
-  - Random Forest
+  - Scikit-learn zoo, plus:
   - CatBoost
   - XGBoost
-  - Logistic Regression
-  - Decision Tree
 - **Optuna Framework**: Leverages Optuna for powerful hyperparameter search.
 - **Maximize or Minimize**: Allows setting the optimization direction (`maximize` or `minimize`).
 - **Scikit-learn API**: Provides a consistent interface for `fit()`, `predict()`, `predict_proba()`, and `score()` methods.
-- **Control Output**: Optionally run Optuna with verbose logging (`verbose=True`) or in silent mode (`verbose=False`).
+- **Control Output**: Optionally run Optuna with granular verbosity settings (`verbose` as `bool` or `int`).
 - **Cross-validation**: Easily integrate cross-validation with custom scoring metrics (e.g., accuracy, ROC AUC).
 
 ## Installation
@@ -69,7 +27,6 @@ y_pred = optimizer.predict(X_test)
 ### a) pip
 
 `pip install optuml`
-
 
 ### b) Manual way
 
@@ -93,7 +50,6 @@ pip install optuna scikit-learn catboost xgboost numpy
 
 Just fetch the `optuml.py` [file from the repo](optuml/optuml.py) and put it in the directory with your script.
 
-
 ## Usage
 
 ### Basic Example
@@ -109,15 +65,11 @@ from OptuML import Optimizer
 # Load the Iris dataset
 X, y = load_iris(return_X_y=True)
 
-# Convert to a binary classification problem
-X = X[y != 2]
-y = y[y != 2]
-
 # Split the dataset into training and test sets
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-# Instantiate the optimizer for SVM
-optimizer = Optimizer(algorithm="SVM", n_trials=50, cv=3, scoring="accuracy", verbose=True, random_state=42)
+# Instantiate the optimizer for SVC
+optimizer = Optimizer(algorithm="SVC", n_trials=50, cv=3, scoring="accuracy", verbose=True)
 
 # Fit the optimizer to the training data
 optimizer.fit(X_train, y_train)
@@ -137,101 +89,60 @@ print(f"Best Hyperparameters: {optimizer.best_params_}")
 
 The `Optimizer` class supports the following algorithms. You can specify the `algorithm` parameter to choose which one to use:
 
-- `"SVM"` (Support Vector Machine)
-- `"kNN"` (k-Nearest Neighbors)
-- `"RandomForest"` (Random Forest)
-- `"CatBoost"` (CatBoost Classifier)
-- `"XGBoost"` (XGBoost Classifier)
-- `"LogisticRegression"` (Logistic Regression)
-- `"DecisionTree"` (Decision Tree Classifier)
-
-### Example of Optimizing Different Algorithms
-
-You can iterate over different algorithms and optimize hyperparameters for each one:
-
-```python
-algorithms = ['SVM', 'kNN', 'RandomForest', 'CatBoost', 'XGBoost', 'LogisticRegression', 'DecisionTree']
-
-for algorithm in algorithms:
-    print(f"Optimizing {algorithm}")
-    optimizer = Optimizer(algorithm=algorithm, n_trials=50, cv=3, scoring="accuracy", verbose=False)
-    optimizer.fit(X_train, y_train)
-    
-    # Predict and calculate accuracy
-    y_pred = optimizer.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"Accuracy for {algorithm}: {accuracy}")
-    print(f"Best Hyperparameters for {algorithm}: {optimizer.best_params_}")
-    print("="*60)
-```
-
-### Custom Scoring and Direction
-
-You can also optimize for different scoring metrics like ROC AUC or use the `direction` parameter to **minimize** or **maximize** the objective:
-
-```python
-# Instantiate the optimizer for RandomForest with ROC AUC optimization
-optimizer = Optimizer(algorithm="RandomForest", n_trials=50, cv=3, scoring="roc_auc", direction="maximize", verbose=True)
-
-# Fit the optimizer to the training data
-optimizer.fit(X_train, y_train)
-
-# Predict probabilities and calculate ROC AUC
-y_proba = optimizer.predict_proba(X_test)
-roc_auc = roc_auc_score(y_test, y_proba[:, 1])
-print(f"ROC AUC: {roc_auc}")
-
-# Print the best hyperparameters
-print(f"Best Hyperparameters: {optimizer.best_params_}")
-```
+| Algorithm                | Type                           |
+|--------------------------|--------------------------------|
+| `"SVC"`                  | Support Vector Classifier      |
+| `"SVR"`                  | Support Vector Regressor       |
+| `"KNeighborsClassifier"`  | k-Nearest Neighbors Classifier |
+| `"KNeighborsRegressor"`   | k-Nearest Neighbors Regressor  |
+| `"RandomForestClassifier"`| Random Forest Classifier       |
+| `"RandomForestRegressor"` | Random Forest Regressor        |
+| `"AdaBoostClassifier"`    | AdaBoost Classifier            |
+| `"AdaBoostRegressor"`     | AdaBoost Regressor             |
+| `"MLPClassifier"`         | Multi-layer Perceptron Classifier |
+| `"MLPRegressor"`          | Multi-layer Perceptron Regressor  |
+| `"GaussianNB"`            | Gaussian Naive Bayes           |
+| `"QDA"`                  | Quadratic Discriminant Analysis |
+| `"CatBoostClassifier"`    | CatBoost Classifier            |
+| `"CatBoostRegressor"`     | CatBoost Regressor             |
+| `"XGBClassifier"`         | XGBoost Classifier             |
+| `"XGBRegressor"`          | XGBoost Regressor              |
 
 ### Controlling Verbosity
 
 You can control the verbosity of Optuna's output by using the `verbose` parameter:
 
-- Set `verbose=True` to enable detailed Optuna logging.
-- Set `verbose=False` to suppress logging and run the optimizer silently.
+- Set `verbose=True` for standard logging.
+- Use an `int` value to specify more granular verbosity levels (e.g., `optuna.logging.DEBUG`).
 
 ```python
-optimizer = Optimizer(algorithm="SVM", n_trials=50, cv=3, scoring="accuracy", verbose=True, random_state=42)
+optimizer = Optimizer(algorithm="SVC", n_trials=50, cv=3, scoring="accuracy", verbose=True)
+```
+
+- and/or show a progress bar:
+
+```python
+optimizer = Optimizer(algorithm="SVC", n_trials=50, cv=3, scoring="accuracy", show_progress_bar=True)
 ```
 
 ## API Reference
 
 ### `Optimizer`
 
-#### Parameters:
+#### Parameters
 
-- **`algorithm`** (`str`): The machine learning algorithm to optimize. Options are `'SVM'`, `'kNN'`, `'RandomForest'`, `'CatBoost'`, `'XGBoost'`, `'LogisticRegression'`, `'DecisionTree'`.
+- **`algorithm`** (`str`): The machine learning algorithm to optimize.
 - **`direction`** (`str`, default `"maximize"`): Direction of optimization. Can be `"maximize"` or `"minimize"`.
-- **`verbose`** (`bool`, default `False`): If `True`, Optuna logging will be enabled. If `False`, the optimizer will run silently.
+- **`verbose`** (`bool` or `int`, default `False`): Controls Optuna's verbosity.
 - **`n_trials`** (`int`, default `100`): Number of optimization trials to run.
 - **`timeout`** (`float`, optional): Maximum time (in seconds) for the optimization process.
 - **`cv`** (`int`, default `5`): Number of cross-validation folds.
 - **`scoring`** (`str`, default `"accuracy"`): Scoring metric to use during cross-validation.
 - **`random_state`** (`int`, optional): Seed for random number generation.
 
-#### Methods:
+#### Methods
 
 - **`fit(X, y)`**: Fit the model using hyperparameter optimization.
 - **`predict(X)`**: Make predictions using the best model found during optimization.
 - **`predict_proba(X)`**: Predict class probabilities (if supported by the model).
 - **`score(X, y)`**: Score the model using the test data.
-- **`optimization_time()`**: Get the total time taken for optimization.
-
-## Contributing
-
-Contributions to the project are welcome! Please feel free to submit issues or pull requests on GitHub. You can also fork the repository and make your changes.
-
-## Running Tests
-
-You can run unit tests using `pytest`:
-
-```bash
-pip install pytest
-pytest
-```
-
-## Contact
-
-If you have any questions or feedback, feel free to open an issue on GitHub.

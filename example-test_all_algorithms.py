@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 # List of classifiers and regressors
 classifiers = [
     "SVC", "KNeighborsClassifier", "RandomForestClassifier",
-    "AdaBoostClassifier", "MLPClassifier", "NaiveBayes",
+    "AdaBoostClassifier", "MLPClassifier", "GaussianNB",
     "QDA", "CatBoostClassifier", "XGBClassifier"
 ]
 

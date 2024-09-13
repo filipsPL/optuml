@@ -19,7 +19,7 @@ class Optimizer(BaseEstimator):
 
     SUPPORTED_ALGORITHMS = [
         "SVC", "SVR", "KNeighborsClassifier", "KNeighborsRegressor", "RandomForestClassifier", "RandomForestRegressor",
-        "AdaBoostClassifier", "AdaBoostRegressor", "MLPClassifier", "MLPRegressor", "NaiveBayes", "QDA", "CatBoostClassifier",
+        "AdaBoostClassifier", "AdaBoostRegressor", "MLPClassifier", "MLPRegressor", "GaussianNB", "QDA", "CatBoostClassifier",
         "CatBoostRegressor", "XGBClassifier", "XGBRegressor"
     ]
 
@@ -62,7 +62,7 @@ class Optimizer(BaseEstimator):
         # Set default scoring method based on algorithm type
         if scoring is None:
             if self.algorithm in [
-                    "SVC", "KNeighborsClassifier", "RandomForestClassifier", "AdaBoostClassifier", "MLPClassifier", "NaiveBayes", "QDA",
+                    "SVC", "KNeighborsClassifier", "RandomForestClassifier", "AdaBoostClassifier", "MLPClassifier", "GaussianNB", "QDA",
                     "CatBoostClassifier", "XGBClassifier"
             ]:
                 self.scoring = "accuracy"
@@ -72,10 +72,10 @@ class Optimizer(BaseEstimator):
             self.scoring = scoring
 
         # Set Optuna logging verbosity
-        if verbose:
-            optuna.logging.set_verbosity(optuna.logging.INFO)
-        else:
-            optuna.logging.set_verbosity(optuna.logging.WARNING)
+        if isinstance(verbose, bool):
+            optuna.logging.set_verbosity(optuna.logging.INFO if verbose else optuna.logging.WARNING)
+        elif isinstance(verbose, int):
+            optuna.logging.set_verbosity(verbose)
 
         # Suppress warnings
         warnings.filterwarnings('ignore', category=UserWarning)
@@ -85,14 +85,14 @@ class Optimizer(BaseEstimator):
 
         # Define the model based on the algorithm
         if self.algorithm == "SVC":
-            C = trial.suggest_float("C", 1e-5, 1e2, log=True)
-            gamma = trial.suggest_float("gamma", 1e-5, 1e1, log=True)
+            C = trial.suggest_float("C", 1e-2, 1e2, log=True)
+            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
             kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
             model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=True)
 
         elif self.algorithm == "SVR":
-            C = trial.suggest_float("C", 1e-5, 1e2, log=True)
-            gamma = trial.suggest_float("gamma", 1e-5, 1e1, log=True)
+            C = trial.suggest_float("C", 1e-2, 1e2, log=True)
+            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
             kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
             model = SVR(C=C, gamma=gamma, kernel=kernel)
 
@@ -158,7 +158,7 @@ class Optimizer(BaseEstimator):
                                  solver=solver,
                                  random_state=self.random_state)
 
-        elif self.algorithm == "NaiveBayes":
+        elif self.algorithm == "GaussianNB":
             model = GaussianNB()
 
         elif self.algorithm == "QDA":
@@ -227,7 +227,7 @@ class Optimizer(BaseEstimator):
             # Handle exceptions during cross-validation
             if self.verbose:
                 print(f"Trial failed with exception: {e}")
-            return float('nan')  # Return NaN so Optuna knows this trial failed
+            return float('nan')
 
     def fit(self, X, y):
         """Fit the chosen ML model with hyperparameter optimization."""
@@ -272,7 +272,7 @@ class Optimizer(BaseEstimator):
             self.best_estimator_ = MLPClassifier(**self.best_params_, random_state=self.random_state)
         elif self.algorithm == "MLPRegressor":
             self.best_estimator_ = MLPRegressor(**self.best_params_, random_state=self.random_state)
-        elif self.algorithm == "NaiveBayes":
+        elif self.algorithm == "GaussianNB":
             self.best_estimator_ = GaussianNB()  # No parameters for Naive Bayes
         elif self.algorithm == "QDA":
             self.best_estimator_ = QDA(**self.best_params_)
@@ -308,7 +308,8 @@ class Optimizer(BaseEstimator):
         if hasattr(self.best_estimator_, "predict_proba"):
             return self.best_estimator_.predict_proba(X)
         else:
-            raise AttributeError(f"The estimator {self.algorithm} does not support probability predictions.")
+            raise AttributeError(f"{self.algorithm} is not a classifier, hence does not support probability predictions.")
+
 
     def score(self, X, y):
         """Return the score of the model on the test data based on the selected scoring method"""

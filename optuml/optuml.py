@@ -30,6 +30,7 @@ class Optimizer(BaseEstimator):
                  algorithm="SVC",
                  direction="maximize",
                  verbose=False,
+                 show_progress_bar=False,
                  n_trials=100,
                  timeout=None,
                  cv=5,
@@ -40,6 +41,7 @@ class Optimizer(BaseEstimator):
         :param algorithm: Machine learning algorithm to optimize (e.g., 'SVC', 'RandomForestRegressor', etc.).
         :param direction: Optimization direction, either 'maximize' (default) or 'minimize'.
         :param verbose: If True, enables Optuna verbose logging.
+        :param show_progress_bar: If True, shows the progress bar during optimization.
         :param n_trials: Number of trials for Optuna optimization (default 100).
         :param timeout: Maximum time allowed for optimization (in seconds).
         :param cv: Number of cross-validation folds (default 5).
@@ -51,6 +53,7 @@ class Optimizer(BaseEstimator):
         self.algorithm = algorithm
         self.direction = direction
         self.verbose = verbose
+        self.show_progress_bar = show_progress_bar
         self.n_trials = n_trials
         self.timeout = timeout
         self.cv = cv
@@ -246,7 +249,7 @@ class Optimizer(BaseEstimator):
             lambda trial: self._objective(trial, X, y),
             n_trials=self.n_trials,
             timeout=self.timeout,
-            show_progress_bar=self.verbose
+            show_progress_bar=self.show_progress_bar
         )
         end_time = time.time()  # End timing the optimization process
 
@@ -313,6 +316,13 @@ class Optimizer(BaseEstimator):
     def predict(self, X):
         """Make predictions using the best estimator"""
         return self.best_estimator_.predict(X)
+
+    def predict_proba(self, X):
+        """Get probability estimates using the best estimator"""
+        if hasattr(self.best_estimator_, "predict_proba"):
+            return self.best_estimator_.predict_proba(X)
+        else:
+            raise AttributeError(f"The estimator {self.algorithm} does not support probability predictions.")
 
     def score(self, X, y):
         """Return the score of the model on the test data based on the selected scoring method"""

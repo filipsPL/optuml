@@ -1,4 +1,5 @@
 import optuna
+
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, AdaBoostClassifier, AdaBoostRegressor
@@ -11,9 +12,10 @@ from sklearn.model_selection import cross_val_score
 from sklearn.base import BaseEstimator
 from catboost import CatBoostClassifier, CatBoostRegressor
 from xgboost import XGBClassifier, XGBRegressor
+
 import time
 import warnings
-
+from wrapt_timeout_decorator import timeout
 
 class Optimizer(BaseEstimator):
 
@@ -32,6 +34,7 @@ class Optimizer(BaseEstimator):
                  timeout=None,
                  cv=5,
                  scoring=None,
+                 timeout_duration=120,
                  random_state=None):
         """
         Initializes the optimizer with the following parameters:
@@ -54,6 +57,7 @@ class Optimizer(BaseEstimator):
         self.n_trials = n_trials
         self.timeout = timeout
         self.cv = cv
+        self.timeout_duration = timeout_duration
         self.random_state = random_state
         self.best_params_ = None
         self.best_estimator_ = None
@@ -79,6 +83,15 @@ class Optimizer(BaseEstimator):
 
         # Suppress warnings
         warnings.filterwarnings('ignore', category=UserWarning)
+
+    def _cross_val_with_timeout(self, model, X, y, cv, scoring):
+        # return cross_val_score(model, X, y, cv=cv, scoring=scoring)
+        @timeout(dec_timeout=self.timeout_duration, use_signals=True, timeout_exception=optuna.TrialPruned)
+        def _wrapped_cross_val():
+            return cross_val_score(model, X, y, cv=cv, scoring=scoring)
+        
+        return _wrapped_cross_val()
+
 
     def _objective(self, trial, X, y):
         """Objective function for Optuna optimization"""
@@ -133,7 +146,7 @@ class Optimizer(BaseEstimator):
         elif self.algorithm == "AdaBoostClassifier":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
             learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
-            model = AdaBoostClassifier(n_estimators=n_estimators, learning_rate=learning_rate, random_state=self.random_state)
+            model = AdaBoostClassifier(n_estimators=n_estimators, learning_rate=learning_rate, algorithm='SAMME', random_state=self.random_state)
 
         elif self.algorithm == "AdaBoostRegressor":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
@@ -222,7 +235,7 @@ class Optimizer(BaseEstimator):
 
         # Perform cross-validation and return the mean score
         try:
-            return cross_val_score(model, X, y, cv=self.cv, scoring=self.scoring).mean()
+            return self._cross_val_with_timeout(model, X, y, cv=self.cv, scoring=self.scoring).mean()
         except Exception as e:
             # Handle exceptions during cross-validation
             if self.verbose:

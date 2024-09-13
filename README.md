@@ -35,25 +35,14 @@ or upgrade with:
 
 ### b) Manual way
 
-#### Prerequisites
-
-Ensure that the following Python packages are installed:
-
-- `optuna`
-- `scikit-learn`
-- `catboost`
-- `xgboost`
-- `numpy`
 
 You can install the required packages via `pip`:
 
 ```bash
-pip install optuna scikit-learn catboost xgboost numpy
+pip install optuna scikit-learn catboost xgboost numpy wrapt_timeout_decorator
 ```
 
-#### Installation
-
-Just fetch the `optuml.py` [file from the repo](optuml/optuml.py) and put it in the directory with your script.
+Next just fetch the `optuml.py` [file from the repo](optuml/optuml.py) and put it in the directory with your script.
 
 ## Usage
 

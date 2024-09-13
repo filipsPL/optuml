@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="optuml",
-    version="0.2.0",
+    version="0.2.1",
     author="Filip S.",
     author_email="filip.ursynow@gmail.com",
     description="Hyperparameter optimization for multiple machine learning algorithms using Optuna, with Scikit-learn API",
@@ -25,6 +25,7 @@ setup(
         "catboost",
         "graphviz",   # Needed for CatBoost
         "xgboost",
-        "numpy"
+        "numpy",
+        "wrapt_timeout_decorator"
     ],
 )

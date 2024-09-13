@@ -163,3 +163,4 @@ cython_debug/
 
 catboost_info/
 NOTATKI.md
+benchmark/

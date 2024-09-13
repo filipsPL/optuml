@@ -50,7 +50,8 @@ for clf_name in classifiers:
         algorithm=clf_name,
         n_trials=20,  # Using 20 trials for demonstration; increase as needed
         verbose=False,
-        random_state=42
+        random_state=42,
+        show_progress_bar=True
     )
     optimizer.fit(Xc_train, yc_train)
     predictions = optimizer.predict(Xc_test)
@@ -66,6 +67,7 @@ for reg_name in regressors:
         algorithm=reg_name,
         n_trials=20,  # Using 20 trials for demonstration; increase as needed
         verbose=False,
+        show_progress_bar=True,
         random_state=42
     )
     optimizer.fit(Xr_train, yr_train)

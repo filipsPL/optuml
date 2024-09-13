@@ -28,6 +28,11 @@ OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms usi
 
 `pip install optuml`
 
+or upgrade with:
+
+`pip install optuml --upgrade`
+
+
 ### b) Manual way
 
 #### Prerequisites
@@ -89,24 +94,32 @@ print(f"Best Hyperparameters: {optimizer.best_params_}")
 
 The `Optimizer` class supports the following algorithms. You can specify the `algorithm` parameter to choose which one to use:
 
+##### Classifiers
+
 | Algorithm                | Type                           |
 |--------------------------|--------------------------------|
-| `"SVC"`                  | Support Vector Classifier      |
-| `"SVR"`                  | Support Vector Regressor       |
-| `"KNeighborsClassifier"`  | k-Nearest Neighbors Classifier |
-| `"KNeighborsRegressor"`   | k-Nearest Neighbors Regressor  |
-| `"RandomForestClassifier"`| Random Forest Classifier       |
-| `"RandomForestRegressor"` | Random Forest Regressor        |
-| `"AdaBoostClassifier"`    | AdaBoost Classifier            |
-| `"AdaBoostRegressor"`     | AdaBoost Regressor             |
-| `"MLPClassifier"`         | Multi-layer Perceptron Classifier |
-| `"MLPRegressor"`          | Multi-layer Perceptron Regressor  |
-| `"GaussianNB"`            | Gaussian Naive Bayes           |
-| `"QDA"`                  | Quadratic Discriminant Analysis |
-| `"CatBoostClassifier"`    | CatBoost Classifier            |
-| `"CatBoostRegressor"`     | CatBoost Regressor             |
-| `"XGBClassifier"`         | XGBoost Classifier             |
-| `"XGBRegressor"`          | XGBoost Regressor              |
+| `AdaBoostClassifier`    | AdaBoost Classifier            |
+| `CatBoostClassifier`    | CatBoost Classifier            |
+| `GaussianNB`            | Gaussian Naive Bayes           |
+| `KNeighborsClassifier`  | k-Nearest Neighbors Classifier |
+| `MLPClassifier`         | Multi-layer Perceptron Classifier |
+| `RandomForestClassifier`| Random Forest Classifier       |
+| `SVC`                  | Support Vector Classifier      |
+| `XGBClassifier`         | XGBoost Classifier             |
+| `QDA`                  | Quadratic Discriminant Analysis |
+
+##### Regressors
+
+| Algorithm                | Type                           |
+|--------------------------|--------------------------------|
+| `AdaBoostRegressor`     | AdaBoost Regressor             |
+| `CatBoostRegressor`     | CatBoost Regressor             |
+| `KNeighborsRegressor`   | k-Nearest Neighbors Regressor  |
+| `MLPRegressor`          | Multi-layer Perceptron Regressor  |
+| `RandomForestRegressor` | Random Forest Regressor        |
+| `SVR`                  | Support Vector Regressor       |
+| `XGBRegressor`          | XGBoost Regressor              |
+
 
 ### Controlling Verbosity
 

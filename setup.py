@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="optuml",
-    version="0.1.4",
+    version="0.2.0",
     author="Filip S.",
     author_email="filip.ursynow@gmail.com",
     description="Hyperparameter optimization for multiple machine learning algorithms using Optuna, with Scikit-learn API",

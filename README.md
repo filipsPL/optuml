@@ -12,13 +12,13 @@ OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms usi
 
 
 ```
-Input                        OptuML train                           Predict                        
-┌────────────────────┐       ┌──────────────────────────────────┐   ┌─────────────────────────────┐
-│   X_train, y_train ┼───────► clf = Optimizer(algorithm="SVC") ├───► y_pred = clf.predict(X_test)│
-└────────────────────┘       │ clf.fit(X_train, y_train)        │   │                             │
-┌────────────────────┐       └─▲────────────────────────────────┘   └─────────────────────────────┘
-│   ML algorithm     ├─────────┘                                                                   
-└────────────────────┘
+Input                  OptuML train                           Predict                        
+┌─────────────────┐    ┌──────────────────────────────────┐   ┌─────────────────────────────┐
+│X_train, y_train ┼────► clf = Optimizer(algorithm="SVC") ├───► y_pred = clf.predict(X_test)│
+└─────────────────┘    │ clf.fit(X_train, y_train)        │   │                             │
+┌─────────────────┐    └─▲────────────────────────────────┘   └─────────────────────────────┘
+│ML algorithm     ├──────┘                                                                   
+└─────────────────┘                                                                          
 ```
 
 ## Features

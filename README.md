@@ -10,6 +10,17 @@ OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms usi
 
 [![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) ![pypi version](https://img.shields.io/pypi/v/optuml)
 
+
+```
+Input                        OptuML train                           Predict                        
+┌────────────────────┐       ┌──────────────────────────────────┐   ┌─────────────────────────────┐
+│   X_train, y_train ┼───────► clf = Optimizer(algorithm="SVC") ├───► y_pred = clf.predict(X_test)│
+└────────────────────┘       │ clf.fit(X_train, y_train)        │   │                             │
+┌────────────────────┐       └─▲────────────────────────────────┘   └─────────────────────────────┘
+│   ML algorithm     ├─────────┘                                                                   
+└────────────────────┘                                                                                                               
+```
+
 ## Features
 
 - **Multiple Algorithms**: Supports hyperparameter optimization for the following algorithms:

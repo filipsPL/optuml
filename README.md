@@ -141,6 +141,7 @@ optimizer = Optimizer(algorithm="SVC", n_trials=50, cv=3, scoring="accuracy", sh
 - **`cv`** (`int`, default `5`): Number of cross-validation folds.
 - **`scoring`** (`str`, default `"accuracy"`): Scoring metric to use during cross-validation.
 - **`random_state`** (`int`, optional): Seed for random number generation.
+- **`cv_timeout`** (`int`, default `120`) Timeout for a signle cv process within a trial
 
 #### Methods
 

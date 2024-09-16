@@ -84,13 +84,27 @@ class Optimizer(BaseEstimator):
         # Suppress warnings
         warnings.filterwarnings('ignore', category=UserWarning)
 
+    # def _cross_val_with_timeout(self, model, X, y, cv, scoring):
+    #     @timeout(dec_timeout=self.timeout_duration, use_signals=True, timeout_exception=optuna.TrialPruned)
+    #     def _wrapped_cross_val():
+    #         # time.sleep(30) # for testing timeout
+    #         return cross_val_score(model, X, y, cv=cv, scoring=scoring)
+        
+    #     return _wrapped_cross_val()
+
     def _cross_val_with_timeout(self, model, X, y, cv, scoring):
         @timeout(dec_timeout=self.timeout_duration, use_signals=True, timeout_exception=optuna.TrialPruned)
         def _wrapped_cross_val():
-            # time.sleep(30) # for testing timeout
-            return cross_val_score(model, X, y, cv=cv, scoring=scoring)
-        
-        return _wrapped_cross_val()
+            return cross_val_score(model, X, y, cv=cv, scoring=scoring, error_score='raise')  # error_score='raise' ensures errors are caught
+
+        try:
+            return _wrapped_cross_val()
+        except optuna.TrialPruned:
+            # Inform the user about the timeout and return NaN for the trial
+            if self.verbose:
+                print(f"Cross-validation for {self.algorithm} model timed out after {self.timeout_duration} seconds.")
+            return float('nan')  # Return NaN to indicate the trial failed due to timeout
+
 
 
     def _objective(self, trial, X, y):
@@ -236,11 +250,18 @@ class Optimizer(BaseEstimator):
         # Perform cross-validation and return the mean score
         try:
             return self._cross_val_with_timeout(model, X, y, cv=self.cv, scoring=self.scoring).mean()
+        except optuna.TrialPruned:
+            # Handle timeout exception specifically
+            if self.verbose:
+                print(f"Trial was pruned due to timeout for {self.algorithm} model.")
+            return float('nan')
         except Exception as e:
-            # Handle exceptions during cross-validation
+            # Handle other exceptions during cross-validation
             if self.verbose:
                 print(f"Trial failed with exception: {e}")
             return float('nan')
+
+
 
     def fit(self, X, y):
         """Fit the chosen ML model with hyperparameter optimization."""

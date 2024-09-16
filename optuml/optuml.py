@@ -34,7 +34,7 @@ class Optimizer(BaseEstimator):
                  timeout=None,
                  cv=5,
                  scoring=None,
-                 timeout_duration=120,
+                 cv_timeout=120,
                  random_state=None):
         """
         Initializes the optimizer with the following parameters:
@@ -57,7 +57,7 @@ class Optimizer(BaseEstimator):
         self.n_trials = n_trials
         self.timeout = timeout
         self.cv = cv
-        self.timeout_duration = timeout_duration
+        self.timeout_duration = cv_timeout
         self.random_state = random_state
         self.best_params_ = None
         self.best_estimator_ = None
@@ -85,9 +85,9 @@ class Optimizer(BaseEstimator):
         warnings.filterwarnings('ignore', category=UserWarning)
 
     def _cross_val_with_timeout(self, model, X, y, cv, scoring):
-        # return cross_val_score(model, X, y, cv=cv, scoring=scoring)
         @timeout(dec_timeout=self.timeout_duration, use_signals=True, timeout_exception=optuna.TrialPruned)
         def _wrapped_cross_val():
+            # time.sleep(30) # for testing timeout
             return cross_val_score(model, X, y, cv=cv, scoring=scoring)
         
         return _wrapped_cross_val()
@@ -249,6 +249,7 @@ class Optimizer(BaseEstimator):
         study.optimize(lambda trial: self._objective(trial, X, y),
                        n_trials=self.n_trials,
                        timeout=self.timeout,
+                       catch=(TimeoutError,), # A study continues to run even when a trial raises one of the exceptions specified in this argument.
                        show_progress_bar=self.show_progress_bar)
         end_time = time.time()  # End timing the optimization process
 

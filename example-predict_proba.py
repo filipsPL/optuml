@@ -15,7 +15,7 @@ y_binarized = Binarizer(threshold=np.median(y)).fit_transform(y.reshape(-1, 1)).
 X_train, X_test, y_train, y_test = train_test_split(X, y_binarized, test_size=0.3, random_state=42)
 
 # Instantiate the Optimizer and optimize for roc_auc
-optimizer = Optimizer(algorithm="SVC", n_trials=50, timeout=300, cv=3, scoring="roc_auc", random_state=42, verbose=True)
+optimizer = Optimizer(algorithm="SVC", n_trials=50, timeout=300, cv=3, scoring="roc_auc", random_state=42, verbose=True, cv_timeout=20)
 optimizer.fit(X_train, y_train)
 
 # Predict probabilities and calculate ROC AUC

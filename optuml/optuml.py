@@ -57,7 +57,7 @@ class Optimizer(BaseEstimator):
         self.n_trials = n_trials
         self.timeout = timeout
         self.cv = cv
-        self.timeout_duration = cv_timeout
+        self.cv_timeout = cv_timeout
         self.random_state = random_state
         self.best_params_ = None
         self.best_estimator_ = None
@@ -93,7 +93,7 @@ class Optimizer(BaseEstimator):
     #     return _wrapped_cross_val()
 
     def _cross_val_with_timeout(self, model, X, y, cv, scoring):
-        @timeout(dec_timeout=self.timeout_duration, use_signals=True, timeout_exception=optuna.TrialPruned)
+        @timeout(dec_timeout=self.cv_timeout, use_signals=True, timeout_exception=optuna.TrialPruned)
         def _wrapped_cross_val():
             return cross_val_score(model, X, y, cv=cv, scoring=scoring, error_score='raise')  # error_score='raise' ensures errors are caught
 
@@ -102,7 +102,7 @@ class Optimizer(BaseEstimator):
         except optuna.TrialPruned:
             # Inform the user about the timeout and return NaN for the trial
             if self.verbose:
-                print(f"Cross-validation for {self.algorithm} model timed out after {self.timeout_duration} seconds.")
+                print(f"Cross-validation for {self.algorithm} model timed out after {self.cv_timeout} seconds.")
             return float('nan')  # Return NaN to indicate the trial failed due to timeout
 
 

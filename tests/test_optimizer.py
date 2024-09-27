@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.datasets import load_iris, load_diabetes
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, r2_score, log_loss
-from optuml import Optimizer  # Replace with the actual module name
+from optuml import Optimizer
 
 # Suppress warnings for cleaner test output
 import warnings

@@ -8,7 +8,7 @@ OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms usi
 
 `OptuML` (for *Optu*na and *ML*) is a Python module that provides hyperparameter optimization for several machine learning algorithms using the [Optuna](https://optuna.org/) framework. The module supports a variety of algorithms and allows easy hyperparameter tuning through a scikit-learn-like API.
 
-[![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) ![pypi version](https://img.shields.io/pypi/v/optuml)
+[![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/)
 
 
 ```

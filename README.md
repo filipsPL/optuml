@@ -10,7 +10,6 @@ OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms usi
 
 [![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/)
 
-
 ```
 Input                  OptuML train                           Predict                        
 ┌─────────────────┐    ┌──────────────────────────────────┐   ┌─────────────────────────────┐
@@ -44,7 +43,6 @@ or upgrade with:
 `pip install optuml --upgrade`
 
 ### b) Manual way
-
 
 You can install the required packages via `pip`:
 
@@ -118,7 +116,6 @@ The `Optimizer` class supports the following algorithms. You can specify the `al
 | `RandomForestRegressor` | Random Forest Regressor        |
 | `SVR`                  | Support Vector Regressor       |
 | `XGBRegressor`          | XGBoost Regressor              |
-
 
 ### Controlling Verbosity
 

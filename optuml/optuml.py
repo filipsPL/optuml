@@ -1,5 +1,5 @@
 import optuna
-# from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.utils.validation import check_is_fitted
 
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
@@ -278,6 +278,8 @@ class Optimizer(BaseEstimator):
         end_time = time.time()  # End timing the optimization process
 
         self.study_time_ = end_time - start_time  # Manually calculate the time taken for optimization
+        self.n_features_in_ = X.shape[1]
+
 
         if len(study.trials) == 0 or study.best_trial is None:
             # No successful trials
@@ -337,6 +339,13 @@ class Optimizer(BaseEstimator):
 
         self.classes_ = unique_labels(y)
 
+        """Fit the chosen ML model with hyperparameter optimization."""
+        if hasattr(X, "columns"):  # Check if input X has feature names (e.g., pandas DataFrame)
+            self.feature_names_in_ = X.columns
+        else:
+            self.feature_names_in_ = None
+
+
         # Fit the best estimator on the full dataset
         self.best_estimator_.fit(X, y)
 
@@ -344,12 +353,14 @@ class Optimizer(BaseEstimator):
 
     def predict(self, X):
         """Make predictions using the best estimator"""
+        check_is_fitted(self, ['best_estimator_', 'classes_', 'n_features_in_'])
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
         return self.best_estimator_.predict(X)
 
     def predict_proba(self, X):
         """Get probability estimates using the best estimator"""
+        check_is_fitted(self, ['best_estimator_', 'classes_', 'n_features_in_'])
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
         if hasattr(self.best_estimator_, "predict_proba"):

@@ -43,7 +43,6 @@ or upgrade with:
 
 `pip install optuml --upgrade`
 
-
 ### b) Manual way
 
 

@@ -1,4 +1,5 @@
 import optuna
+# from sklearn.model_selection import StratifiedShuffleSplit
 
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
@@ -12,6 +13,8 @@ from sklearn.model_selection import cross_val_score
 from sklearn.base import BaseEstimator
 from catboost import CatBoostClassifier, CatBoostRegressor
 from xgboost import XGBClassifier, XGBRegressor
+from sklearn.utils.multiclass import unique_labels
+
 
 import time
 import warnings
@@ -196,7 +199,7 @@ class Optimizer(BaseEstimator):
             depth = trial.suggest_int("depth", 4, 10)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
             l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
-            iterations = trial.suggest_int("iterations", 100, 1000)
+            iterations = trial.suggest_int("iterations", 100, 1000, step=50)
             model = CatBoostClassifier(depth=depth,
                                        learning_rate=learning_rate,
                                        l2_leaf_reg=l2_leaf_reg,
@@ -208,7 +211,7 @@ class Optimizer(BaseEstimator):
             depth = trial.suggest_int("depth", 4, 10)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
             l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
-            iterations = trial.suggest_int("iterations", 100, 1000)
+            iterations = trial.suggest_int("iterations", 100, 1000, step=50)
             model = CatBoostRegressor(depth=depth,
                                       learning_rate=learning_rate,
                                       l2_leaf_reg=l2_leaf_reg,
@@ -324,6 +327,15 @@ class Optimizer(BaseEstimator):
             self.best_estimator_ = XGBRegressor(**self.best_params_, random_state=self.random_state)
         else:
             raise ValueError(f"Algorithm {self.algorithm} is not supported.")
+
+
+        # # Capture the classes for classifiers
+        # if hasattr(self.best_estimator_, "classes_"):
+        #     self.classes_ = self.best_estimator_.classes_
+        # else:
+        #     self.classes_ = unique_labels(y)
+
+        self.classes_ = unique_labels(y)
 
         # Fit the best estimator on the full dataset
         self.best_estimator_.fit(X, y)

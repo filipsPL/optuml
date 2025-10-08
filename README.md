@@ -54,7 +54,7 @@ Next just fetch the `optuml.py` [file from the repo](optuml/optuml.py) and put i
 
 ## Usage
 
-### Basic Example
+### Classification
 
 Here’s how you can use the `Optimizer` class to optimize hyperparameters for different machine learning algorithms using the **Iris** dataset:
 
@@ -87,7 +87,7 @@ print(f"Accuracy: {accuracy}")
 print(f"Best Hyperparameters: {optimizer.best_params_}")
 ```
 
-And for regression:
+### Regression
 
 
 ```python
@@ -173,3 +173,7 @@ optimizer = Optimizer(algorithm="SVC", n_trials=50, cv=3, scoring="accuracy", sh
 - **`predict(X)`**: Make predictions using the best model found during optimization.
 - **`predict_proba(X)`**: Predict class probabilities (if supported by the model).
 - **`score(X, y)`**: Score the model using the test data.
+
+## Known issues
+
+- optuml has problems with pipelines. To be solved.

@@ -11,7 +11,7 @@ OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms usi
 [![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/)
 
 ```
-Input                  OptuML train                           Predict                        
+Input                  optuml train                           Predict                        
 ┌─────────────────┐    ┌──────────────────────────────────┐   ┌─────────────────────────────┐
 │X_train, y_train ┼────► clf = Optimizer(algorithm="SVC") ├───► y_pred = clf.predict(X_test)│
 └─────────────────┘    │ clf.fit(X_train, y_train)        │   │                             │
@@ -30,7 +30,7 @@ Input                  OptuML train                           Predict
 - **Maximize or Minimize**: Allows setting the optimization direction (`maximize` or `minimize`).
 - **Scikit-learn API**: Provides a consistent interface for `fit()`, `predict()`, `predict_proba()`, and `score()` methods.
 - **Control Output**: Optionally run Optuna with granular verbosity settings (`verbose` as `bool` or `int`).
-- **Cross-validation**: Easily integrate cross-validation with custom scoring metrics (e.g., accuracy, ROC AUC).
+- **Cross-validation**: Easily integrate cross-validation with custom scoring metrics (e.g., accuracy, ROC AUC). Please check the [scikit-learn documents](https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-string-names) for available metrics.
 
 ## Installation
 
@@ -62,7 +62,7 @@ Here’s how you can use the `Optimizer` class to optimize hyperparameters for d
 from sklearn.datasets import load_iris
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
-from OptuML import Optimizer
+from optuml import Optimizer
 
 # Load the Iris dataset
 X, y = load_iris(return_X_y=True)
@@ -86,6 +86,23 @@ print(f"Accuracy: {accuracy}")
 # Print the best hyperparameters found during optimization
 print(f"Best Hyperparameters: {optimizer.best_params_}")
 ```
+
+And for regression:
+
+
+```python
+from sklearn.datasets import load_diabetes
+from sklearn.model_selection import train_test_split
+from optuml import Optimizer
+
+X, y = load_diabetes(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+optimizer = Optimizer(algorithm="KNeighborsRegressor", n_trials=5, cv=3, scoring="neg_mean_squared_error", verbose=True)
+optimizer.fit(X_train, y_train)
+y_pred = optimizer.predict(X_test)
+print(f"Best Hyperparameters: {optimizer.best_params_}")
+```
+
 
 ### Available Algorithms
 

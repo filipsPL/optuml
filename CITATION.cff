@@ -1,0 +1,30 @@
+
+cff-version: 1.2.0
+title: optuml
+message: >-
+  OptuML (for Optuna and ML) is a Python module that
+  provides hyperparameter optimization for several machine
+  learning algorithms using the Optuna framework. The module
+  supports a variety of algorithms and allows easy
+  hyperparameter tuning through a scikit-learn-like API.
+type: software
+authors:
+  - given-names: Filip
+    family-names: Stefaniak
+    affiliation: >-
+      International Institute of Molecular and Cell Biology
+      in Warsaw
+    orcid: 'https://orcid.org/0000-0001-5758-9416'
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.17305963
+    description: Zenodo repository
+  - type: url
+    value: 'https://github.com/filipsPL/optuml'
+    description: GitHub repository
+repository-code: 'https://github.com/filipsPL/optuml'
+keywords:
+  - optuna
+  - scikit-learn
+  - python
+license: MIT

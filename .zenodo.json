@@ -1,0 +1,19 @@
+{
+  "license": "mit",
+  "title": "OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms using Optuna",
+  "version": "0-1-1",
+  "upload_type": "software",
+  "publication_date": "2024-09-21",
+  "language": "eng",
+  "description": "<p><b>OptuML</b> (for Optuna and ML) is a Python module that provides hyperparameter optimization for several machine learning algorithms using the Optuna framework. The module supports a variety of algorithms and allows easy hyperparameter tuning through a scikit-learn-like API.</p>",
+  "notes": "This research was funded in part by the National Science Centre in Poland (grant number 2020/39/B/NZ2/03127 to F.S.)",
+  "keywords": ["python", "optuna", "machine learning", "hyperparameter optimization", "scikit-learn"],
+  "creators": [
+    {
+      "affiliation": "International Institute of Molecular and Cell Biology in Warsaw",
+      "name": "Filip Stefaniak",
+      "orcid": "0000-0001-5758-9416"
+    }
+  ],
+  "access_right": "open"
+}

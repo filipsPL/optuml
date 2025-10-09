@@ -2,13 +2,13 @@ OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms usi
 =============================
 
 ```
-  ⣰⡁ ⡀⣀ ⢀⡀ ⣀⣀    ⡎⢱ ⣀⡀ ⣰⡀ ⡀⢀ ⡷⢾ ⡇    ⠄ ⣀⣀  ⣀⡀ ⢀⡀ ⡀⣀ ⣰⡀   ⡎⢱ ⣀⡀ ⣰⡀ ⠄ ⣀⣀  ⠄ ⣀⣀ ⢀⡀ ⡀⣀
-  ⢸  ⠏  ⠣⠜ ⠇⠇⠇   ⠣⠜ ⡧⠜ ⠘⠤ ⠣⠼ ⠇⠸ ⠧⠤   ⠇ ⠇⠇⠇ ⡧⠜ ⠣⠜ ⠏  ⠘⠤   ⠣⠜ ⡧⠜ ⠘⠤ ⠇ ⠇⠇⠇ ⠇ ⠴⠥ ⠣⠭ ⠏ 
+ ⣰⡁ ⡀⣀ ⢀⡀ ⣀⣀    ⢀⡀ ⣀⡀ ⣰⡀ ⡀⢀ ⣀⣀  ⡇   ⠄ ⣀⣀  ⣀⡀ ⢀⡀ ⡀⣀ ⣰⡀   ⡎⢱ ⣀⡀ ⣰⡀ ⠄ ⣀⣀  ⠄ ⣀⣀ ⢀⡀ ⡀⣀
+ ⢸  ⠏  ⠣⠜ ⠇⠇⠇   ⠣⠜ ⡧⠜ ⠘⠤ ⠣⠼ ⠇⠇⠇ ⠣   ⠇ ⠇⠇⠇ ⡧⠜ ⠣⠜ ⠏  ⠘⠤   ⠣⠜ ⡧⠜ ⠘⠤ ⠇ ⠇⠇⠇ ⠇ ⠴⠥ ⠣⠭ ⠏ 
 ```
 
 `OptuML` (for *Optu*na and *ML*) is a Python module that provides hyperparameter optimization for several machine learning algorithms using the [Optuna](https://optuna.org/) framework. The module supports a variety of algorithms and allows easy hyperparameter tuning through a scikit-learn-like API.
 
-[![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/)
+[![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17305964.svg)](https://doi.org/10.5281/zenodo.17305963)
 
 ```
 Input                  optuml train                           Predict                        
@@ -177,3 +177,8 @@ optimizer = Optimizer(algorithm="SVC", n_trials=50, cv=3, scoring="accuracy", sh
 ## Known issues
 
 - optuml has problems with pipelines. To be solved.
+
+
+## How to cite
+
+Filip Stefaniak. (2024). OptuML: Hyperparameter Optimization for Multiple Machine Learning Algorithms using Optuna. Zenodo. https://doi.org/10.5281/zenodo.17305963

@@ -2,7 +2,7 @@
 
 import pytest
 import numpy as np
-from sklearn.datasets import load_iris, load_diabetes
+from sklearn.datasets import load_iris, load_diabetes, load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, r2_score, log_loss
 from optuml import Optimizer
@@ -17,6 +17,14 @@ def classification_data():
     """Fixture for classification dataset."""
     X, y = load_iris(return_X_y=True)
     return train_test_split(X, y, test_size=0.2, random_state=42)
+
+
+@pytest.fixture(scope="module")
+def classification_data_binary():
+    """Fixture for classification dataset."""
+    X, y = load_breast_cancer(return_X_y=True)
+    return train_test_split(X, y, test_size=0.2, random_state=42)
+
 
 
 @pytest.fixture(scope="module")
@@ -88,6 +96,25 @@ def test_predict_proba_supported_classifier(classification_data):
     assert proba_predictions.shape == (len(X_test), len(np.unique(y_train)))
     assert np.all(proba_predictions >= 0) and np.all(proba_predictions <= 1)
     assert np.allclose(proba_predictions.sum(axis=1), 1)
+
+
+def test_predict_proba_supported_classifier_auc(classification_data_binary):
+    """Test predict_proba method on a classifier that supports it."""
+    X_train, X_test, y_train, y_test = classification_data_binary
+    optimizer = Optimizer(
+        algorithm="KNeighborsClassifier",
+        n_trials=5,
+        random_state=42,
+        scoring="roc_auc"
+    )
+    optimizer.fit(X_train, y_train)
+    proba_predictions = optimizer.predict_proba(X_test)
+    
+    assert isinstance(proba_predictions, np.ndarray)
+    assert proba_predictions.shape == (len(X_test), len(np.unique(y_train)))
+    assert np.all(proba_predictions >= 0) and np.all(proba_predictions <= 1)
+    assert np.allclose(proba_predictions.sum(axis=1), 1)
+
 
 
 def test_predict_proba_unsupported_estimator(regression_data):

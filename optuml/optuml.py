@@ -15,7 +15,7 @@ from catboost import CatBoostClassifier, CatBoostRegressor
 from xgboost import XGBClassifier, XGBRegressor
 from sklearn.utils.multiclass import unique_labels
 
-
+import numpy as np
 import time
 import warnings
 from wrapt_timeout_decorator import timeout
@@ -26,6 +26,12 @@ class Optimizer(BaseEstimator):
         "SVC", "SVR", "KNeighborsClassifier", "KNeighborsRegressor", "RandomForestClassifier", "RandomForestRegressor",
         "AdaBoostClassifier", "AdaBoostRegressor", "MLPClassifier", "MLPRegressor", "GaussianNB", "QDA", "CatBoostClassifier",
         "CatBoostRegressor", "XGBClassifier", "XGBRegressor"
+    ]
+
+    # Define which algorithms are classifiers
+    CLASSIFIER_ALGORITHMS = [
+        "SVC", "KNeighborsClassifier", "RandomForestClassifier", "AdaBoostClassifier", 
+        "MLPClassifier", "GaussianNB", "QDA", "CatBoostClassifier", "XGBClassifier"
     ]
 
     def __init__(self,
@@ -49,6 +55,7 @@ class Optimizer(BaseEstimator):
         :param timeout: Maximum time allowed for optimization (in seconds).
         :param cv: Number of cross-validation folds (default 5).
         :param scoring: Scoring method for cross-validation (default "accuracy" for classifiers and "r2" for regressors).
+        :param cv_timeout: Timeout for a single cv process within a trial (default 120).
         :param random_state: Random state for reproducibility (default None).
         """
         if algorithm not in self.SUPPORTED_ALGORITHMS:
@@ -64,14 +71,12 @@ class Optimizer(BaseEstimator):
         self.random_state = random_state
         self.best_params_ = None
         self.best_estimator_ = None
+        self.best_score_ = None
         self.study_time_ = None
 
         # Set default scoring method based on algorithm type
         if scoring is None:
-            if self.algorithm in [
-                    "SVC", "KNeighborsClassifier", "RandomForestClassifier", "AdaBoostClassifier", "MLPClassifier", "GaussianNB", "QDA",
-                    "CatBoostClassifier", "XGBClassifier"
-            ]:
+            if self.algorithm in self.CLASSIFIER_ALGORITHMS:
                 self.scoring = "accuracy"
             else:
                 self.scoring = "r2"
@@ -87,29 +92,27 @@ class Optimizer(BaseEstimator):
         # Suppress warnings
         warnings.filterwarnings('ignore', category=UserWarning)
 
-    # def _cross_val_with_timeout(self, model, X, y, cv, scoring):
-    #     @timeout(dec_timeout=self.timeout_duration, use_signals=True, timeout_exception=optuna.TrialPruned)
-    #     def _wrapped_cross_val():
-    #         # time.sleep(30) # for testing timeout
-    #         return cross_val_score(model, X, y, cv=cv, scoring=scoring)
-        
-    #     return _wrapped_cross_val()
-
     def _cross_val_with_timeout(self, model, X, y, cv, scoring):
+        """
+        Perform cross-validation with timeout protection.
+        Returns NaN if timeout occurs or if an error is raised.
+        """
         @timeout(dec_timeout=self.cv_timeout, use_signals=True, timeout_exception=optuna.TrialPruned)
         def _wrapped_cross_val():
-            return cross_val_score(model, X, y, cv=cv, scoring=scoring, error_score='raise')  # error_score='raise' ensures errors are caught
+            return cross_val_score(model, X, y, cv=cv, scoring=scoring, error_score='raise')
 
         try:
             return _wrapped_cross_val()
         except (optuna.TrialPruned, KeyboardInterrupt):
-            # keyboard - for cat boost
-            # Inform the user about the timeout and return NaN for the trial
+            # Timeout occurred or keyboard interrupt (for CatBoost)
             if self.verbose:
                 print(f"Cross-validation for {self.algorithm} model timed out after {self.cv_timeout} seconds.")
-            return float('nan')  # Return NaN to indicate the trial failed due to timeout
-
-
+            raise optuna.TrialPruned()
+        except Exception as e:
+            # Other errors during cross-validation
+            if self.verbose:
+                print(f"Cross-validation failed with exception: {e}")
+            raise optuna.TrialPruned()
 
     def _objective(self, trial, X, y):
         """Objective function for Optuna optimization"""
@@ -164,7 +167,11 @@ class Optimizer(BaseEstimator):
         elif self.algorithm == "AdaBoostClassifier":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
             learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
-            model = AdaBoostClassifier(n_estimators=n_estimators, learning_rate=learning_rate, algorithm='SAMME', random_state=self.random_state)
+            algorithm = trial.suggest_categorical("algorithm", ["SAMME", "SAMME.R"])
+            model = AdaBoostClassifier(n_estimators=n_estimators, 
+                                      learning_rate=learning_rate, 
+                                      algorithm=algorithm, 
+                                      random_state=self.random_state)
 
         elif self.algorithm == "AdaBoostRegressor":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
@@ -190,7 +197,8 @@ class Optimizer(BaseEstimator):
                                  random_state=self.random_state)
 
         elif self.algorithm == "GaussianNB":
-            model = GaussianNB()
+            var_smoothing = trial.suggest_float("var_smoothing", 1e-10, 1e-5, log=True)
+            model = GaussianNB(var_smoothing=var_smoothing)
 
         elif self.algorithm == "QDA":
             reg_param = trial.suggest_float("reg_param", 0.0, 1.0)
@@ -252,45 +260,34 @@ class Optimizer(BaseEstimator):
             raise ValueError(f"Algorithm {self.algorithm} is not supported.")
 
         # Perform cross-validation and return the mean score
-        try:
-            return self._cross_val_with_timeout(model, X, y, cv=self.cv, scoring=self.scoring).mean()
-        except (optuna.TrialPruned, KeyboardInterrupt):
-            # Handle timeout exception specifically
-            if self.verbose:
-                print(f"Trial was pruned due to timeout for {self.algorithm} model.")
-            return float('nan')
-        except Exception as e:
-            # Handle other exceptions during cross-validation
-            if self.verbose:
-                print(f"Trial failed with exception: {e}")
-            return float('nan')
-
-
+        scores = self._cross_val_with_timeout(model, X, y, cv=self.cv, scoring=self.scoring)
+        return scores.mean()
 
     def fit(self, X, y):
         """Fit the chosen ML model with hyperparameter optimization."""
-        start_time = time.time()  # Start timing the optimization process
+        start_time = time.time()
         study = optuna.create_study(direction=self.direction)
         study.optimize(lambda trial: self._objective(trial, X, y),
                        n_trials=self.n_trials,
                        timeout=self.timeout,
-                       catch=(TimeoutError,), # A study continues to run even when a trial raises one of the exceptions specified in this argument.
+                       catch=(TimeoutError,),
                        show_progress_bar=self.show_progress_bar)
-        end_time = time.time()  # End timing the optimization process
+        end_time = time.time()
 
-        self.study_time_ = end_time - start_time  # Manually calculate the time taken for optimization
+        self.study_time_ = end_time - start_time
         self.n_features_in_ = X.shape[1]
-
 
         if len(study.trials) == 0 or study.best_trial is None:
             # No successful trials
-            if self.verbose:
-                print("No successful trials. Optimization failed.")
-            self.best_params_ = None
-            self.best_estimator_ = None
-            return self
+            raise RuntimeError(
+                "Optimization failed: No successful trials completed. "
+                "This may be due to: (1) all trials timing out, (2) all trials failing due to errors, "
+                "or (3) invalid hyperparameter configurations. "
+                "Try: increasing cv_timeout, reducing cv folds, or checking your data for issues."
+            )
 
         self.best_params_ = study.best_params
+        self.best_score_ = study.best_value
 
         # Set the best estimator based on the algorithm
         if self.algorithm == "SVC":
@@ -314,7 +311,7 @@ class Optimizer(BaseEstimator):
         elif self.algorithm == "MLPRegressor":
             self.best_estimator_ = MLPRegressor(**self.best_params_, random_state=self.random_state)
         elif self.algorithm == "GaussianNB":
-            self.best_estimator_ = GaussianNB()  # No parameters for Naive Bayes
+            self.best_estimator_ = GaussianNB(**self.best_params_)
         elif self.algorithm == "QDA":
             self.best_estimator_ = QDA(**self.best_params_)
         elif self.algorithm == "CatBoostClassifier":
@@ -331,47 +328,54 @@ class Optimizer(BaseEstimator):
         else:
             raise ValueError(f"Algorithm {self.algorithm} is not supported.")
 
-
-        # # Capture the classes for classifiers
-        # if hasattr(self.best_estimator_, "classes_"):
-        #     self.classes_ = self.best_estimator_.classes_
-        # else:
-        #     self.classes_ = unique_labels(y)
-
-        self.classes_ = unique_labels(y)
-
-        """Fit the chosen ML model with hyperparameter optimization."""
-        if hasattr(X, "columns"):  # Check if input X has feature names (e.g., pandas DataFrame)
-            self.feature_names_in_ = X.columns
-        else:
-            self.feature_names_in_ = None
-
+        # Capture feature names if input is a DataFrame
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = np.array(X.columns)
 
         # Fit the best estimator on the full dataset
         self.best_estimator_.fit(X, y)
+
+        # Set classes_ attribute for classifiers (must be done after fitting)
+        if self.algorithm in self.CLASSIFIER_ALGORITHMS:
+            self.classes_ = self.best_estimator_.classes_
+
+        # Set n_outputs_ for sklearn compatibility
+        self.n_outputs_ = 1 if y.ndim == 1 else y.shape[1]
 
         return self
 
     def predict(self, X):
         """Make predictions using the best estimator"""
-        check_is_fitted(self, ['best_estimator_', 'classes_', 'n_features_in_'])
+        # For classifiers, check for classes_ attribute
+        if self.algorithm in self.CLASSIFIER_ALGORITHMS:
+            check_is_fitted(self, ['best_estimator_', 'classes_', 'n_features_in_'])
+        else:
+            check_is_fitted(self, ['best_estimator_', 'n_features_in_'])
+        
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
         return self.best_estimator_.predict(X)
 
     def predict_proba(self, X):
         """Get probability estimates using the best estimator"""
+        # Only classifiers should have classes_
         check_is_fitted(self, ['best_estimator_', 'classes_', 'n_features_in_'])
+        
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
-        if hasattr(self.best_estimator_, "predict_proba"):
-            return self.best_estimator_.predict_proba(X)
-        else:
-            raise AttributeError(f"{self.algorithm} is not a classifier, hence does not support probability predictions.")
-
+        
+        if not hasattr(self.best_estimator_, "predict_proba"):
+            raise AttributeError(
+                f"{self.algorithm} does not support probability predictions. "
+                f"This method is only available for classifiers."
+            )
+        
+        return self.best_estimator_.predict_proba(X)
 
     def score(self, X, y):
         """Return the score of the model on the test data based on the selected scoring method"""
+        check_is_fitted(self, ['best_estimator_', 'n_features_in_'])
+        
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
         return self.best_estimator_.score(X, y)

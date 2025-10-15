@@ -102,7 +102,8 @@ class Optimizer(BaseEstimator):
 
         try:
             return _wrapped_cross_val()
-        except optuna.TrialPruned:
+        except (optuna.TrialPruned, KeyboardInterrupt):
+            # keyboard - for cat boost
             # Inform the user about the timeout and return NaN for the trial
             if self.verbose:
                 print(f"Cross-validation for {self.algorithm} model timed out after {self.cv_timeout} seconds.")
@@ -253,7 +254,7 @@ class Optimizer(BaseEstimator):
         # Perform cross-validation and return the mean score
         try:
             return self._cross_val_with_timeout(model, X, y, cv=self.cv, scoring=self.scoring).mean()
-        except optuna.TrialPruned:
+        except (optuna.TrialPruned, KeyboardInterrupt):
             # Handle timeout exception specifically
             if self.verbose:
                 print(f"Trial was pruned due to timeout for {self.algorithm} model.")

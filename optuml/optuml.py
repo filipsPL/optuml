@@ -20,31 +20,54 @@ import time
 import warnings
 from wrapt_timeout_decorator import timeout
 
+
 class Optimizer(BaseEstimator):
 
     SUPPORTED_ALGORITHMS = [
-        "SVC", "SVR", "KNeighborsClassifier", "KNeighborsRegressor", "RandomForestClassifier", "RandomForestRegressor",
-        "AdaBoostClassifier", "AdaBoostRegressor", "MLPClassifier", "MLPRegressor", "GaussianNB", "QDA", "CatBoostClassifier",
-        "CatBoostRegressor", "XGBClassifier", "XGBRegressor"
+        "SVC",
+        "SVR",
+        "KNeighborsClassifier",
+        "KNeighborsRegressor",
+        "RandomForestClassifier",
+        "RandomForestRegressor",
+        "AdaBoostClassifier",
+        "AdaBoostRegressor",
+        "MLPClassifier",
+        "MLPRegressor",
+        "GaussianNB",
+        "QDA",
+        "CatBoostClassifier",
+        "CatBoostRegressor",
+        "XGBClassifier",
+        "XGBRegressor",
     ]
 
     # Define which algorithms are classifiers
     CLASSIFIER_ALGORITHMS = [
-        "SVC", "KNeighborsClassifier", "RandomForestClassifier", "AdaBoostClassifier", 
-        "MLPClassifier", "GaussianNB", "QDA", "CatBoostClassifier", "XGBClassifier"
+        "SVC",
+        "KNeighborsClassifier",
+        "RandomForestClassifier",
+        "AdaBoostClassifier",
+        "MLPClassifier",
+        "GaussianNB",
+        "QDA",
+        "CatBoostClassifier",
+        "XGBClassifier",
     ]
 
-    def __init__(self,
-                 algorithm="SVC",
-                 direction="maximize",
-                 verbose=False,
-                 show_progress_bar=False,
-                 n_trials=100,
-                 timeout=None,
-                 cv=5,
-                 scoring=None,
-                 cv_timeout=120,
-                 random_state=None):
+    def __init__(
+        self,
+        algorithm="SVC",
+        direction="maximize",
+        verbose=False,
+        show_progress_bar=False,
+        n_trials=100,
+        timeout=None,
+        cv=5,
+        scoring=None,
+        cv_timeout=120,
+        random_state=None,
+    ):
         """
         Initializes the optimizer with the following parameters:
         :param algorithm: Machine learning algorithm to optimize (e.g., 'SVC', 'RandomForestRegressor', etc.).
@@ -90,16 +113,17 @@ class Optimizer(BaseEstimator):
             optuna.logging.set_verbosity(verbose)
 
         # Suppress warnings
-        warnings.filterwarnings('ignore', category=UserWarning)
+        warnings.filterwarnings("ignore", category=UserWarning)
 
     def _cross_val_with_timeout(self, model, X, y, cv, scoring):
         """
         Perform cross-validation with timeout protection.
         Returns NaN if timeout occurs or if an error is raised.
         """
+
         @timeout(dec_timeout=self.cv_timeout, use_signals=True, timeout_exception=optuna.TrialPruned)
         def _wrapped_cross_val():
-            return cross_val_score(model, X, y, cv=cv, scoring=scoring, error_score='raise')
+            return cross_val_score(model, X, y, cv=cv, scoring=scoring, error_score="raise")
 
         try:
             return _wrapped_cross_val()
@@ -147,31 +171,34 @@ class Optimizer(BaseEstimator):
             max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
             min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
-            model = RandomForestClassifier(n_estimators=n_estimators,
-                                           max_depth=max_depth,
-                                           min_samples_split=min_samples_split,
-                                           min_samples_leaf=min_samples_leaf,
-                                           random_state=self.random_state)
+            model = RandomForestClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                random_state=self.random_state,
+            )
 
         elif self.algorithm == "RandomForestRegressor":
             n_estimators = trial.suggest_int("n_estimators", 10, 200)
             max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
             min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
-            model = RandomForestRegressor(n_estimators=n_estimators,
-                                          max_depth=max_depth,
-                                          min_samples_split=min_samples_split,
-                                          min_samples_leaf=min_samples_leaf,
-                                          random_state=self.random_state)
+            model = RandomForestRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                random_state=self.random_state,
+            )
 
         elif self.algorithm == "AdaBoostClassifier":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
             learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
             algorithm = trial.suggest_categorical("algorithm", ["SAMME", "SAMME.R"])
-            model = AdaBoostClassifier(n_estimators=n_estimators, 
-                                      learning_rate=learning_rate, 
-                                      algorithm=algorithm, 
-                                      random_state=self.random_state)
+            model = AdaBoostClassifier(
+                n_estimators=n_estimators, learning_rate=learning_rate, algorithm=algorithm, random_state=self.random_state
+            )
 
         elif self.algorithm == "AdaBoostRegressor":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
@@ -182,19 +209,13 @@ class Optimizer(BaseEstimator):
             hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 100)])
             activation = trial.suggest_categorical("activation", ["tanh", "relu"])
             solver = trial.suggest_categorical("solver", ["adam", "sgd"])
-            model = MLPClassifier(hidden_layer_sizes=hidden_layer_sizes,
-                                  activation=activation,
-                                  solver=solver,
-                                  random_state=self.random_state)
+            model = MLPClassifier(hidden_layer_sizes=hidden_layer_sizes, activation=activation, solver=solver, random_state=self.random_state)
 
         elif self.algorithm == "MLPRegressor":
             hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 100)])
             activation = trial.suggest_categorical("activation", ["tanh", "relu"])
             solver = trial.suggest_categorical("solver", ["adam", "sgd"])
-            model = MLPRegressor(hidden_layer_sizes=hidden_layer_sizes,
-                                 activation=activation,
-                                 solver=solver,
-                                 random_state=self.random_state)
+            model = MLPRegressor(hidden_layer_sizes=hidden_layer_sizes, activation=activation, solver=solver, random_state=self.random_state)
 
         elif self.algorithm == "GaussianNB":
             var_smoothing = trial.suggest_float("var_smoothing", 1e-10, 1e-5, log=True)
@@ -209,24 +230,28 @@ class Optimizer(BaseEstimator):
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
             l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
             iterations = trial.suggest_int("iterations", 100, 1000, step=50)
-            model = CatBoostClassifier(depth=depth,
-                                       learning_rate=learning_rate,
-                                       l2_leaf_reg=l2_leaf_reg,
-                                       iterations=iterations,
-                                       random_state=self.random_state,
-                                       verbose=False)
+            model = CatBoostClassifier(
+                depth=depth,
+                learning_rate=learning_rate,
+                l2_leaf_reg=l2_leaf_reg,
+                iterations=iterations,
+                random_state=self.random_state,
+                verbose=False,
+            )
 
         elif self.algorithm == "CatBoostRegressor":
             depth = trial.suggest_int("depth", 4, 10)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
             l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
             iterations = trial.suggest_int("iterations", 100, 1000, step=50)
-            model = CatBoostRegressor(depth=depth,
-                                      learning_rate=learning_rate,
-                                      l2_leaf_reg=l2_leaf_reg,
-                                      iterations=iterations,
-                                      random_state=self.random_state,
-                                      verbose=False)
+            model = CatBoostRegressor(
+                depth=depth,
+                learning_rate=learning_rate,
+                l2_leaf_reg=l2_leaf_reg,
+                iterations=iterations,
+                random_state=self.random_state,
+                verbose=False,
+            )
 
         elif self.algorithm == "XGBClassifier":
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
@@ -234,14 +259,16 @@ class Optimizer(BaseEstimator):
             learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
             colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
-            model = XGBClassifier(n_estimators=n_estimators,
-                                  max_depth=max_depth,
-                                  learning_rate=learning_rate,
-                                  subsample=subsample,
-                                  colsample_bytree=colsample_bytree,
-                                  random_state=self.random_state,
-                                  use_label_encoder=False,
-                                  eval_metric='logloss')
+            model = XGBClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                random_state=self.random_state,
+                use_label_encoder=False,
+                eval_metric="logloss",
+            )
 
         elif self.algorithm == "XGBRegressor":
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
@@ -249,12 +276,14 @@ class Optimizer(BaseEstimator):
             learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
             colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
-            model = XGBRegressor(n_estimators=n_estimators,
-                                 max_depth=max_depth,
-                                 learning_rate=learning_rate,
-                                 subsample=subsample,
-                                 colsample_bytree=colsample_bytree,
-                                 random_state=self.random_state)
+            model = XGBRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                random_state=self.random_state,
+            )
 
         else:
             raise ValueError(f"Algorithm {self.algorithm} is not supported.")
@@ -267,11 +296,13 @@ class Optimizer(BaseEstimator):
         """Fit the chosen ML model with hyperparameter optimization."""
         start_time = time.time()
         study = optuna.create_study(direction=self.direction)
-        study.optimize(lambda trial: self._objective(trial, X, y),
-                       n_trials=self.n_trials,
-                       timeout=self.timeout,
-                       catch=(TimeoutError,),
-                       show_progress_bar=self.show_progress_bar)
+        study.optimize(
+            lambda trial: self._objective(trial, X, y),
+            n_trials=self.n_trials,
+            timeout=self.timeout,
+            catch=(TimeoutError,),
+            show_progress_bar=self.show_progress_bar,
+        )
         end_time = time.time()
 
         self.study_time_ = end_time - start_time
@@ -319,10 +350,9 @@ class Optimizer(BaseEstimator):
         elif self.algorithm == "CatBoostRegressor":
             self.best_estimator_ = CatBoostRegressor(**self.best_params_, random_state=self.random_state, verbose=False)
         elif self.algorithm == "XGBClassifier":
-            self.best_estimator_ = XGBClassifier(**self.best_params_,
-                                                 random_state=self.random_state,
-                                                 use_label_encoder=False,
-                                                 eval_metric='logloss')
+            self.best_estimator_ = XGBClassifier(
+                **self.best_params_, random_state=self.random_state, use_label_encoder=False, eval_metric="logloss"
+            )
         elif self.algorithm == "XGBRegressor":
             self.best_estimator_ = XGBRegressor(**self.best_params_, random_state=self.random_state)
         else:
@@ -348,10 +378,10 @@ class Optimizer(BaseEstimator):
         """Make predictions using the best estimator"""
         # For classifiers, check for classes_ attribute
         if self.algorithm in self.CLASSIFIER_ALGORITHMS:
-            check_is_fitted(self, ['best_estimator_', 'classes_', 'n_features_in_'])
+            check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
         else:
-            check_is_fitted(self, ['best_estimator_', 'n_features_in_'])
-        
+            check_is_fitted(self, ["best_estimator_", "n_features_in_"])
+
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
         return self.best_estimator_.predict(X)
@@ -359,23 +389,22 @@ class Optimizer(BaseEstimator):
     def predict_proba(self, X):
         """Get probability estimates using the best estimator"""
         # Only classifiers should have classes_
-        check_is_fitted(self, ['best_estimator_', 'classes_', 'n_features_in_'])
-        
+        check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
+
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
-        
+
         if not hasattr(self.best_estimator_, "predict_proba"):
             raise AttributeError(
-                f"{self.algorithm} does not support probability predictions. "
-                f"This method is only available for classifiers."
+                f"{self.algorithm} does not support probability predictions. " f"This method is only available for classifiers."
             )
-        
+
         return self.best_estimator_.predict_proba(X)
 
     def score(self, X, y):
         """Return the score of the model on the test data based on the selected scoring method"""
-        check_is_fitted(self, ['best_estimator_', 'n_features_in_'])
-        
+        check_is_fitted(self, ["best_estimator_", "n_features_in_"])
+
         if self.best_estimator_ is None:
             raise AttributeError("Estimator has not been fitted yet.")
         return self.best_estimator_.score(X, y)

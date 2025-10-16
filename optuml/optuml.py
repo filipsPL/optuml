@@ -448,8 +448,13 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         self : object
             Fitted estimator
         """
-        # Validate input
-        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True)
+        # Validate input - handle sklearn version compatibility
+        try:
+            # Try new parameter name first (sklearn >= 1.6)
+            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True)
+        except TypeError:
+            # Fall back to old parameter name (sklearn < 1.6)
+            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], force_all_finite=True, ensure_2d=True)
 
         # Store feature information
         self.n_features_in_ = X.shape[1]
@@ -734,7 +739,13 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             Fitted estimator
         """
         # Validate input
-        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True, y_numeric=True)
+        # X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True, y_numeric=True)
+        try:
+            # Try new parameter name first (sklearn >= 1.6)
+            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True, y_numeric=True)
+        except TypeError:
+            # Fall back to old parameter name (sklearn < 1.6)
+            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], force_all_finite=True, ensure_2d=True, y_numeric=True)
 
         # Store feature information
         self.n_features_in_ = X.shape[1]

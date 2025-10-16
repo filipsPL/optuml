@@ -223,11 +223,17 @@ def test_optimizer_invalid_cv(classification_data):
     """Test that the optimizer raises an error with invalid cv parameter."""
     X_train, X_test, y_train, y_test = classification_data
 
-    optimizer = Optimizer(
-        algorithm="SVC",
-        n_trials=5,
-        cv=-1,  # Invalid cv value
-        random_state=42
-    )
-    with pytest.raises(ValueError):
-        optimizer.fit(X_train, y_train)
+    # optimizer = Optimizer(
+    #     algorithm="SVC",
+    #     n_trials=5,
+    #     cv=-1,  # Invalid cv value
+    #     random_state=42
+    # )
+
+    with pytest.raises(ValueError, match="cv must be at least 2"):
+        optimizer = Optimizer(
+            algorithm="SVC",
+            n_trials=5,
+            cv=-1,  # Invalid cv value
+            random_state=42
+        )

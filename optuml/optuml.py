@@ -1,6 +1,24 @@
-import optuna
-from sklearn.utils.validation import check_is_fitted
+"""
+OptuML: Optuna-based Machine Learning Model Optimizer
+A scikit-learn compatible optimizer for automatic hyperparameter tuning
+"""
 
+import optuna
+import numpy as np
+import pandas as pd
+import time
+import warnings
+import platform
+from typing import Optional, Union, Any, Dict, Tuple
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+# Sklearn imports
+from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.model_selection import cross_val_score
+from sklearn.utils.multiclass import unique_labels
+
+# Model imports
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, AdaBoostClassifier, AdaBoostRegressor
@@ -9,37 +27,827 @@ from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis as QDA
-from sklearn.model_selection import cross_val_score
-from sklearn.base import BaseEstimator
-from catboost import CatBoostClassifier, CatBoostRegressor
-from xgboost import XGBClassifier, XGBRegressor
-from sklearn.utils.multiclass import unique_labels
 
-import numpy as np
-import time
-import warnings
-from wrapt_timeout_decorator import timeout
+# Optional imports for CatBoost and XGBoost
+try:
+    from catboost import CatBoostClassifier, CatBoostRegressor
+
+    CATBOOST_AVAILABLE = True
+except ImportError:
+    CATBOOST_AVAILABLE = False
+
+try:
+    from xgboost import XGBClassifier, XGBRegressor
+
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
 
 
-class Optimizer(BaseEstimator):
+class OptimizerBase(BaseEstimator):
+    """Base class for Optuna-based optimizers"""
+
+    def __init__(
+        self,
+        algorithm: str,
+        direction: str = "maximize",
+        verbose: Union[bool, int] = False,
+        show_progress_bar: bool = False,
+        n_trials: int = 100,
+        timeout: Optional[float] = None,
+        cv: int = 5,
+        scoring: Optional[str] = None,
+        cv_timeout: float = 120,
+        random_state: Optional[int] = None,
+        early_stopping_patience: Optional[int] = None,
+        n_jobs: int = 1,
+    ):
+        """
+        Initialize the optimizer.
+
+        Parameters
+        ----------
+        algorithm : str
+            Machine learning algorithm to optimize
+        direction : str, default='maximize'
+            Optimization direction ('maximize' or 'minimize')
+        verbose : bool or int, default=False
+            Verbosity level for Optuna logging
+        show_progress_bar : bool, default=False
+            Whether to show progress bar during optimization
+        n_trials : int, default=100
+            Number of trials for optimization
+        timeout : float or None, default=None
+            Maximum time allowed for optimization (seconds)
+        cv : int, default=5
+            Number of cross-validation folds
+        scoring : str or None, default=None
+            Scoring method for cross-validation
+        cv_timeout : float, default=120
+            Timeout for a single CV evaluation (seconds)
+        random_state : int or None, default=None
+            Random state for reproducibility
+        early_stopping_patience : int or None, default=None
+            Number of trials without improvement before stopping
+        n_jobs : int, default=1
+            Number of parallel jobs for cross-validation
+        """
+        self.algorithm = algorithm
+        self.direction = direction
+        self.verbose = verbose
+        self.show_progress_bar = show_progress_bar
+        self.n_trials = n_trials
+        self.timeout = timeout
+        self.cv = cv
+        self.scoring = scoring
+        self.cv_timeout = cv_timeout
+        self.random_state = random_state
+        self.early_stopping_patience = early_stopping_patience
+        self.n_jobs = n_jobs
+
+        # Attributes to be set during fitting
+        self.best_params_ = None
+        self.best_estimator_ = None
+        self.best_score_ = None
+        self.study_time_ = None
+        self.study_ = None
+        self.n_trials_completed_ = None
+
+        # Validate parameters
+        self._validate_params()
+
+        # Set Optuna logging verbosity
+        self._set_optuna_verbosity()
+
+        # Suppress warnings if not verbose
+        if not verbose:
+            warnings.filterwarnings("ignore", category=UserWarning)
+
+    def _validate_params(self):
+        """Validate initialization parameters"""
+        if self.n_trials <= 0:
+            raise ValueError("n_trials must be positive")
+        if self.cv <= 1:
+            raise ValueError("cv must be at least 2")
+        if self.direction not in ["maximize", "minimize"]:
+            raise ValueError("direction must be 'maximize' or 'minimize'")
+        if self.timeout is not None and self.timeout <= 0:
+            raise ValueError("timeout must be positive or None")
+        if self.cv_timeout <= 0:
+            raise ValueError("cv_timeout must be positive")
+        if self.early_stopping_patience is not None and self.early_stopping_patience <= 0:
+            raise ValueError("early_stopping_patience must be positive or None")
+
+    def _set_optuna_verbosity(self):
+        """Set Optuna logging verbosity level"""
+        if isinstance(self.verbose, bool):
+            level = optuna.logging.INFO if self.verbose else optuna.logging.WARNING
+        elif isinstance(self.verbose, int):
+            level = self.verbose
+        else:
+            level = optuna.logging.WARNING
+        optuna.logging.set_verbosity(level)
+
+    def _cross_val_with_timeout(self, model, X, y):
+        """
+        Perform cross-validation with timeout protection.
+
+        Parameters
+        ----------
+        model : estimator
+            The model to evaluate
+        X : array-like
+            Features
+        y : array-like
+            Target values
+
+        Returns
+        -------
+        scores : array
+            Cross-validation scores
+        """
+        # Use ThreadPoolExecutor for timeout (works on all platforms)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(cross_val_score, model, X, y, cv=self.cv, scoring=self.scoring, n_jobs=self.n_jobs, error_score="raise")
+            try:
+                scores = future.result(timeout=self.cv_timeout)
+                return scores
+            except FutureTimeoutError:
+                if self.verbose:
+                    print(f"Cross-validation timed out after {self.cv_timeout} seconds.")
+                raise optuna.TrialPruned()
+            except Exception as e:
+                if self.verbose:
+                    print(f"Cross-validation failed: {e}")
+                raise optuna.TrialPruned()
+
+    def _get_early_stopping_callback(self):
+        """Create early stopping callback for Optuna"""
+        if self.early_stopping_patience is None:
+            return None
+
+        class EarlyStoppingCallback:
+            def __init__(self, patience, direction):
+                self.patience = patience
+                self.direction = direction
+                self.best_score = None
+                self.counter = 0
+
+            def __call__(self, study, trial):
+                if trial.value is None:  # Pruned trial
+                    return
+
+                current_score = trial.value
+                if self.best_score is None:
+                    self.best_score = current_score
+                    self.counter = 0
+                else:
+                    if self.direction == "maximize":
+                        improved = current_score > self.best_score
+                    else:
+                        improved = current_score < self.best_score
+
+                    if improved:
+                        self.best_score = current_score
+                        self.counter = 0
+                    else:
+                        self.counter += 1
+                        if self.counter >= self.patience:
+                            study.stop()
+
+        return EarlyStoppingCallback(self.early_stopping_patience, self.direction)
+
+    def get_params(self, deep=True):
+        """Get parameters for this estimator (sklearn compatibility)"""
+        return {
+            "algorithm": self.algorithm,
+            "direction": self.direction,
+            "verbose": self.verbose,
+            "show_progress_bar": self.show_progress_bar,
+            "n_trials": self.n_trials,
+            "timeout": self.timeout,
+            "cv": self.cv,
+            "scoring": self.scoring,
+            "cv_timeout": self.cv_timeout,
+            "random_state": self.random_state,
+            "early_stopping_patience": self.early_stopping_patience,
+            "n_jobs": self.n_jobs,
+        }
+
+    def set_params(self, **params):
+        """Set parameters for this estimator (sklearn compatibility)"""
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+            else:
+                raise ValueError(f"Invalid parameter {key}")
+
+        # Re-validate parameters
+        self._validate_params()
+        self._set_optuna_verbosity()
+
+        return self
+
+
+class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
+    """Optimizer for classification algorithms"""
+
+    _estimator_type = "classifier"
 
     SUPPORTED_ALGORITHMS = [
         "SVC",
-        "SVR",
         "KNeighborsClassifier",
-        "KNeighborsRegressor",
         "RandomForestClassifier",
-        "RandomForestRegressor",
         "AdaBoostClassifier",
-        "AdaBoostRegressor",
         "MLPClassifier",
-        "MLPRegressor",
         "GaussianNB",
         "QDA",
-        "CatBoostClassifier",
-        "CatBoostRegressor",
-        "XGBClassifier",
-        "XGBRegressor",
+        "LogisticRegression",
+        "DecisionTreeClassifier",
+    ]
+
+    def __init__(self, algorithm="SVC", scoring="accuracy", **kwargs):
+        """Initialize classifier optimizer with default scoring"""
+        # Add CatBoost and XGBoost if available
+        if CATBOOST_AVAILABLE and algorithm == "CatBoostClassifier":
+            self.SUPPORTED_ALGORITHMS.append("CatBoostClassifier")
+        if XGBOOST_AVAILABLE and algorithm == "XGBClassifier":
+            self.SUPPORTED_ALGORITHMS.append("XGBClassifier")
+
+        if algorithm not in self.SUPPORTED_ALGORITHMS:
+            available = ", ".join(self.SUPPORTED_ALGORITHMS)
+            raise ValueError(f"Algorithm {algorithm} not supported. Available: {available}")
+
+        super().__init__(algorithm=algorithm, scoring=scoring, **kwargs)
+
+    def _objective(self, trial, X, y):
+        """Objective function for Optuna optimization"""
+
+        # Model selection and hyperparameter suggestions
+        if self.algorithm == "SVC":
+            C = trial.suggest_float("C", 1e-2, 1e2, log=True)
+            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
+            kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
+            model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=True)
+
+        elif self.algorithm == "KNeighborsClassifier":
+            n_neighbors = trial.suggest_int("n_neighbors", 1, min(20, len(y) // 2))
+            weights = trial.suggest_categorical("weights", ["uniform", "distance"])
+            p = trial.suggest_int("p", 1, 2)
+            model = KNeighborsClassifier(n_neighbors=n_neighbors, weights=weights, p=p)
+
+        elif self.algorithm == "RandomForestClassifier":
+            n_estimators = trial.suggest_int("n_estimators", 10, 200)
+            max_depth = trial.suggest_int("max_depth", 2, 32)
+            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = RandomForestClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "AdaBoostClassifier":
+            n_estimators = trial.suggest_int("n_estimators", 50, 200)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
+            ada_algorithm = trial.suggest_categorical("ada_algorithm", ["SAMME", "SAMME.R"])
+            model = AdaBoostClassifier(
+                n_estimators=n_estimators,
+                learning_rate=learning_rate,
+                algorithm=ada_algorithm,  # Fixed: no more parameter collision
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "MLPClassifier":
+            hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 50), (100, 100)])
+            activation = trial.suggest_categorical("activation", ["tanh", "relu", "logistic"])
+            solver = trial.suggest_categorical("solver", ["adam", "sgd", "lbfgs"])
+            alpha = trial.suggest_float("alpha", 1e-5, 1e-1, log=True)
+            learning_rate = trial.suggest_categorical("learning_rate", ["constant", "adaptive"])
+            model = MLPClassifier(
+                hidden_layer_sizes=hidden_layer_sizes,
+                activation=activation,
+                solver=solver,
+                alpha=alpha,
+                learning_rate=learning_rate,
+                random_state=self.random_state,
+                max_iter=1000,
+                early_stopping=True,
+            )
+
+        elif self.algorithm == "GaussianNB":
+            var_smoothing = trial.suggest_float("var_smoothing", 1e-10, 1e-5, log=True)
+            model = GaussianNB(var_smoothing=var_smoothing)
+
+        elif self.algorithm == "QDA":
+            reg_param = trial.suggest_float("reg_param", 0.0, 1.0)
+            model = QDA(reg_param=reg_param)
+
+        elif self.algorithm == "LogisticRegression":
+            C = trial.suggest_float("C", 1e-4, 1e2, log=True)
+            penalty = trial.suggest_categorical("penalty", ["l2", "l1", "elasticnet", "none"])
+
+            # Solver selection based on penalty
+            if penalty == "l1":
+                solver = "liblinear"
+            elif penalty == "elasticnet":
+                solver = "saga"
+                l1_ratio = trial.suggest_float("l1_ratio", 0.0, 1.0)
+                model = LogisticRegression(C=C, penalty=penalty, solver=solver, l1_ratio=l1_ratio, random_state=self.random_state, max_iter=1000)
+            elif penalty == "none":
+                solver = trial.suggest_categorical("solver", ["lbfgs", "newton-cg", "saga"])
+                model = LogisticRegression(C=C, penalty=penalty, solver=solver, random_state=self.random_state, max_iter=1000)
+            else:  # l2
+                solver = trial.suggest_categorical("solver", ["lbfgs", "liblinear", "saga"])
+                model = LogisticRegression(C=C, penalty=penalty, solver=solver, random_state=self.random_state, max_iter=1000)
+
+            # Handle special case for elasticnet which was created above
+            if penalty != "elasticnet":
+                model = LogisticRegression(C=C, penalty=penalty, solver=solver, random_state=self.random_state, max_iter=1000)
+
+        elif self.algorithm == "DecisionTreeClassifier":
+            max_depth = trial.suggest_int("max_depth", 2, 32)
+            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            criterion = trial.suggest_categorical("criterion", ["gini", "entropy"])
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = DecisionTreeClassifier(
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                criterion=criterion,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "CatBoostClassifier" and CATBOOST_AVAILABLE:
+            depth = trial.suggest_int("depth", 4, 10)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.3, log=True)
+            l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
+            iterations = trial.suggest_int("iterations", 100, 1000, step=50)
+            border_count = trial.suggest_int("border_count", 32, 255)
+            model = CatBoostClassifier(
+                depth=depth,
+                learning_rate=learning_rate,
+                l2_leaf_reg=l2_leaf_reg,
+                iterations=iterations,
+                border_count=border_count,
+                random_state=self.random_state,
+                verbose=False,
+                allow_writing_files=False,
+            )
+
+        elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
+            n_estimators = trial.suggest_int("n_estimators", 50, 500)
+            max_depth = trial.suggest_int("max_depth", 2, 20)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.3, log=True)
+            subsample = trial.suggest_float("subsample", 0.5, 1.0)
+            colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
+            gamma = trial.suggest_float("gamma", 0, 5)
+            reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True)
+            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True)
+            model = XGBClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                gamma=gamma,
+                reg_alpha=reg_alpha,
+                reg_lambda=reg_lambda,
+                random_state=self.random_state,
+                use_label_encoder=False,
+                eval_metric="logloss",
+                verbosity=0,
+            )
+
+        else:
+            raise ValueError(f"Algorithm {self.algorithm} is not implemented")
+
+        # Perform cross-validation
+        scores = self._cross_val_with_timeout(model, X, y)
+        return scores.mean()
+
+    def fit(self, X, y):
+        """
+        Fit the optimizer to find the best hyperparameters.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training features
+        y : array-like of shape (n_samples,)
+            Target values
+
+        Returns
+        -------
+        self : object
+            Fitted estimator
+        """
+        # Validate input
+        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True)
+
+        # Store feature information
+        self.n_features_in_ = X.shape[1]
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = np.array(X.columns)
+
+        # Create and run the study
+        start_time = time.time()
+
+        self.study_ = optuna.create_study(direction=self.direction, sampler=optuna.samplers.TPESampler(seed=self.random_state))
+
+        # Add callbacks
+        callbacks = []
+        early_stopping_callback = self._get_early_stopping_callback()
+        if early_stopping_callback:
+            callbacks.append(early_stopping_callback)
+
+        # Optimize
+        self.study_.optimize(
+            lambda trial: self._objective(trial, X, y),
+            n_trials=self.n_trials,
+            timeout=self.timeout,
+            show_progress_bar=self.show_progress_bar,
+            callbacks=callbacks,
+            catch=(Exception,),
+        )
+
+        self.study_time_ = time.time() - start_time
+        self.n_trials_completed_ = len(self.study_.trials)
+
+        # Check if any trials succeeded
+        if self.n_trials_completed_ == 0 or self.study_.best_trial is None:
+            raise RuntimeError(
+                "Optimization failed: No successful trials completed. " "Try: increasing cv_timeout, reducing cv folds, or checking your data."
+            )
+
+        # Store best results
+        self.best_params_ = self.study_.best_params
+        self.best_score_ = self.study_.best_value
+
+        # Create and fit the best estimator
+        self._create_best_estimator()
+        self.best_estimator_.fit(X, y)
+
+        # Set classes_ for classifiers
+        self.classes_ = unique_labels(y)
+        self.n_classes_ = len(self.classes_)
+        self.n_outputs_ = 1 if y.ndim == 1 else y.shape[1]
+
+        return self
+
+    def _create_best_estimator(self):
+        """Create the best estimator with optimal parameters"""
+        params = self.best_params_.copy()
+
+        if self.algorithm == "SVC":
+            self.best_estimator_ = SVC(**params, random_state=self.random_state, probability=True)
+        elif self.algorithm == "KNeighborsClassifier":
+            self.best_estimator_ = KNeighborsClassifier(**params)
+        elif self.algorithm == "RandomForestClassifier":
+            self.best_estimator_ = RandomForestClassifier(**params, random_state=self.random_state)
+        elif self.algorithm == "AdaBoostClassifier":
+            # Fix parameter name for AdaBoost
+            if "ada_algorithm" in params:
+                params["algorithm"] = params.pop("ada_algorithm")
+            self.best_estimator_ = AdaBoostClassifier(**params, random_state=self.random_state)
+        elif self.algorithm == "MLPClassifier":
+            self.best_estimator_ = MLPClassifier(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
+        elif self.algorithm == "GaussianNB":
+            self.best_estimator_ = GaussianNB(**params)
+        elif self.algorithm == "QDA":
+            self.best_estimator_ = QDA(**params)
+        elif self.algorithm == "LogisticRegression":
+            if "l1_ratio" not in params:
+                params["l1_ratio"] = None
+            self.best_estimator_ = LogisticRegression(**params, random_state=self.random_state, max_iter=1000)
+        elif self.algorithm == "DecisionTreeClassifier":
+            self.best_estimator_ = DecisionTreeClassifier(**params, random_state=self.random_state)
+        elif self.algorithm == "CatBoostClassifier" and CATBOOST_AVAILABLE:
+            self.best_estimator_ = CatBoostClassifier(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
+        elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
+            self.best_estimator_ = XGBClassifier(
+                **params, random_state=self.random_state, use_label_encoder=False, eval_metric="logloss", verbosity=0
+            )
+
+    def predict(self, X):
+        """Make predictions using the best estimator"""
+        check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
+        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        return self.best_estimator_.predict(X)
+
+    def predict_proba(self, X):
+        """Predict class probabilities using the best estimator"""
+        check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
+        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+
+        if not hasattr(self.best_estimator_, "predict_proba"):
+            raise AttributeError(f"{self.algorithm} does not support probability predictions")
+
+        return self.best_estimator_.predict_proba(X)
+
+    def decision_function(self, X):
+        """Get decision function values"""
+        check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
+        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+
+        if not hasattr(self.best_estimator_, "decision_function"):
+            raise AttributeError(f"{self.algorithm} does not have decision_function")
+
+        return self.best_estimator_.decision_function(X)
+
+    def score(self, X, y):
+        """Return the mean accuracy on the given test data and labels"""
+        check_is_fitted(self, ["best_estimator_", "n_features_in_"])
+        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True)
+        return self.best_estimator_.score(X, y)
+
+
+class RegressorOptimizer(OptimizerBase, RegressorMixin):
+    """Optimizer for regression algorithms"""
+
+    _estimator_type = "regressor"
+
+    SUPPORTED_ALGORITHMS = [
+        "SVR",
+        "KNeighborsRegressor",
+        "RandomForestRegressor",
+        "AdaBoostRegressor",
+        "MLPRegressor",
+        "LinearRegression",
+        "DecisionTreeRegressor",
+    ]
+
+    def __init__(self, algorithm="SVR", scoring="r2", **kwargs):
+        """Initialize regressor optimizer with default scoring"""
+        # Add CatBoost and XGBoost if available
+        if CATBOOST_AVAILABLE and algorithm == "CatBoostRegressor":
+            self.SUPPORTED_ALGORITHMS.append("CatBoostRegressor")
+        if XGBOOST_AVAILABLE and algorithm == "XGBRegressor":
+            self.SUPPORTED_ALGORITHMS.append("XGBRegressor")
+
+        if algorithm not in self.SUPPORTED_ALGORITHMS:
+            available = ", ".join(self.SUPPORTED_ALGORITHMS)
+            raise ValueError(f"Algorithm {algorithm} not supported. Available: {available}")
+
+        super().__init__(algorithm=algorithm, scoring=scoring, **kwargs)
+
+    def _objective(self, trial, X, y):
+        """Objective function for Optuna optimization"""
+
+        # Model selection and hyperparameter suggestions
+        if self.algorithm == "SVR":
+            C = trial.suggest_float("C", 1e-2, 1e2, log=True)
+            epsilon = trial.suggest_float("epsilon", 1e-4, 1.0, log=True)
+            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
+            kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
+            model = SVR(C=C, epsilon=epsilon, gamma=gamma, kernel=kernel)
+
+        elif self.algorithm == "KNeighborsRegressor":
+            n_neighbors = trial.suggest_int("n_neighbors", 1, min(20, len(y) // 2))
+            weights = trial.suggest_categorical("weights", ["uniform", "distance"])
+            p = trial.suggest_int("p", 1, 2)
+            model = KNeighborsRegressor(n_neighbors=n_neighbors, weights=weights, p=p)
+
+        elif self.algorithm == "RandomForestRegressor":
+            n_estimators = trial.suggest_int("n_estimators", 10, 200)
+            max_depth = trial.suggest_int("max_depth", 2, 32)
+            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = RandomForestRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "AdaBoostRegressor":
+            n_estimators = trial.suggest_int("n_estimators", 50, 200)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
+            loss = trial.suggest_categorical("loss", ["linear", "square", "exponential"])
+            model = AdaBoostRegressor(n_estimators=n_estimators, learning_rate=learning_rate, loss=loss, random_state=self.random_state)
+
+        elif self.algorithm == "MLPRegressor":
+            hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 50), (100, 100)])
+            activation = trial.suggest_categorical("activation", ["tanh", "relu", "logistic"])
+            solver = trial.suggest_categorical("solver", ["adam", "sgd", "lbfgs"])
+            alpha = trial.suggest_float("alpha", 1e-5, 1e-1, log=True)
+            learning_rate = trial.suggest_categorical("learning_rate", ["constant", "adaptive"])
+            model = MLPRegressor(
+                hidden_layer_sizes=hidden_layer_sizes,
+                activation=activation,
+                solver=solver,
+                alpha=alpha,
+                learning_rate=learning_rate,
+                random_state=self.random_state,
+                max_iter=1000,
+                early_stopping=True,
+            )
+
+        elif self.algorithm == "LinearRegression":
+            fit_intercept = trial.suggest_categorical("fit_intercept", [True, False])
+            model = LinearRegression(fit_intercept=fit_intercept)
+
+        elif self.algorithm == "DecisionTreeRegressor":
+            max_depth = trial.suggest_int("max_depth", 2, 32)
+            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            criterion = trial.suggest_categorical("criterion", ["squared_error", "friedman_mse", "absolute_error", "poisson"])
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = DecisionTreeRegressor(
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                criterion=criterion,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "CatBoostRegressor" and CATBOOST_AVAILABLE:
+            depth = trial.suggest_int("depth", 4, 10)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.3, log=True)
+            l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
+            iterations = trial.suggest_int("iterations", 100, 1000, step=50)
+            border_count = trial.suggest_int("border_count", 32, 255)
+            model = CatBoostRegressor(
+                depth=depth,
+                learning_rate=learning_rate,
+                l2_leaf_reg=l2_leaf_reg,
+                iterations=iterations,
+                border_count=border_count,
+                random_state=self.random_state,
+                verbose=False,
+                allow_writing_files=False,
+            )
+
+        elif self.algorithm == "XGBRegressor" and XGBOOST_AVAILABLE:
+            n_estimators = trial.suggest_int("n_estimators", 50, 500)
+            max_depth = trial.suggest_int("max_depth", 2, 20)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.3, log=True)
+            subsample = trial.suggest_float("subsample", 0.5, 1.0)
+            colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
+            gamma = trial.suggest_float("gamma", 0, 5)
+            reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True)
+            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True)
+            model = XGBRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                gamma=gamma,
+                reg_alpha=reg_alpha,
+                reg_lambda=reg_lambda,
+                random_state=self.random_state,
+                verbosity=0,
+            )
+
+        else:
+            raise ValueError(f"Algorithm {self.algorithm} is not implemented")
+
+        # Perform cross-validation
+        scores = self._cross_val_with_timeout(model, X, y)
+        return scores.mean()
+
+    def fit(self, X, y):
+        """
+        Fit the optimizer to find the best hyperparameters.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training features
+        y : array-like of shape (n_samples,)
+            Target values
+
+        Returns
+        -------
+        self : object
+            Fitted estimator
+        """
+        # Validate input
+        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True, y_numeric=True)
+
+        # Store feature information
+        self.n_features_in_ = X.shape[1]
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = np.array(X.columns)
+
+        # Create and run the study
+        start_time = time.time()
+
+        self.study_ = optuna.create_study(direction=self.direction, sampler=optuna.samplers.TPESampler(seed=self.random_state))
+
+        # Add callbacks
+        callbacks = []
+        early_stopping_callback = self._get_early_stopping_callback()
+        if early_stopping_callback:
+            callbacks.append(early_stopping_callback)
+
+        # Optimize
+        self.study_.optimize(
+            lambda trial: self._objective(trial, X, y),
+            n_trials=self.n_trials,
+            timeout=self.timeout,
+            show_progress_bar=self.show_progress_bar,
+            callbacks=callbacks,
+            catch=(Exception,),
+        )
+
+        self.study_time_ = time.time() - start_time
+        self.n_trials_completed_ = len(self.study_.trials)
+
+        # Check if any trials succeeded
+        if self.n_trials_completed_ == 0 or self.study_.best_trial is None:
+            raise RuntimeError(
+                "Optimization failed: No successful trials completed. " "Try: increasing cv_timeout, reducing cv folds, or checking your data."
+            )
+
+        # Store best results
+        self.best_params_ = self.study_.best_params
+        self.best_score_ = self.study_.best_value
+
+        # Create and fit the best estimator
+        self._create_best_estimator()
+        self.best_estimator_.fit(X, y)
+
+        # Set output dimensions
+        self.n_outputs_ = 1 if y.ndim == 1 else y.shape[1]
+
+        return self
+
+    def _create_best_estimator(self):
+        """Create the best estimator with optimal parameters"""
+        params = self.best_params_.copy()
+
+        if self.algorithm == "SVR":
+            self.best_estimator_ = SVR(**params)
+        elif self.algorithm == "KNeighborsRegressor":
+            self.best_estimator_ = KNeighborsRegressor(**params)
+        elif self.algorithm == "RandomForestRegressor":
+            self.best_estimator_ = RandomForestRegressor(**params, random_state=self.random_state)
+        elif self.algorithm == "AdaBoostRegressor":
+            self.best_estimator_ = AdaBoostRegressor(**params, random_state=self.random_state)
+        elif self.algorithm == "MLPRegressor":
+            self.best_estimator_ = MLPRegressor(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
+        elif self.algorithm == "LinearRegression":
+            self.best_estimator_ = LinearRegression(**params)
+        elif self.algorithm == "DecisionTreeRegressor":
+            self.best_estimator_ = DecisionTreeRegressor(**params, random_state=self.random_state)
+        elif self.algorithm == "CatBoostRegressor" and CATBOOST_AVAILABLE:
+            self.best_estimator_ = CatBoostRegressor(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
+        elif self.algorithm == "XGBRegressor" and XGBOOST_AVAILABLE:
+            self.best_estimator_ = XGBRegressor(**params, random_state=self.random_state, verbosity=0)
+
+    def predict(self, X):
+        """Make predictions using the best estimator"""
+        check_is_fitted(self, ["best_estimator_", "n_features_in_"])
+        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        return self.best_estimator_.predict(X)
+
+    def score(self, X, y):
+        """Return the coefficient of determination R^2 of the prediction"""
+        check_is_fitted(self, ["best_estimator_", "n_features_in_"])
+        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True, y_numeric=True)
+        return self.best_estimator_.score(X, y)
+
+
+class Optimizer(BaseEstimator):
+    """
+    Universal optimizer that automatically selects between classifier and regressor.
+
+    This is a convenience wrapper that maintains backward compatibility with the
+    original API while providing proper separation between classifiers and regressors.
+    """
+
+    # Combined list of all supported algorithms
+    SUPPORTED_ALGORITHMS = [
+        # Classifiers
+        "SVC",
+        "KNeighborsClassifier",
+        "RandomForestClassifier",
+        "AdaBoostClassifier",
+        "MLPClassifier",
+        "GaussianNB",
+        "QDA",
+        "LogisticRegression",
+        "DecisionTreeClassifier",
+        # Regressors
+        "SVR",
+        "KNeighborsRegressor",
+        "RandomForestRegressor",
+        "AdaBoostRegressor",
+        "MLPRegressor",
+        "LinearRegression",
+        "DecisionTreeRegressor",
     ]
 
     # Define which algorithms are classifiers
@@ -51,8 +859,8 @@ class Optimizer(BaseEstimator):
         "MLPClassifier",
         "GaussianNB",
         "QDA",
-        "CatBoostClassifier",
-        "XGBClassifier",
+        "LogisticRegression",
+        "DecisionTreeClassifier",
     ]
 
     def __init__(
@@ -67,344 +875,185 @@ class Optimizer(BaseEstimator):
         scoring=None,
         cv_timeout=120,
         random_state=None,
+        early_stopping_patience=None,
+        n_jobs=1,
     ):
         """
-        Initializes the optimizer with the following parameters:
-        :param algorithm: Machine learning algorithm to optimize (e.g., 'SVC', 'RandomForestRegressor', etc.).
-        :param direction: Optimization direction, either 'maximize' (default) or 'minimize'.
-        :param verbose: If True, enables Optuna verbose logging.
-        :param show_progress_bar: If True, shows the progress bar during optimization.
-        :param n_trials: Number of trials for Optuna optimization (default 100).
-        :param timeout: Maximum time allowed for optimization (in seconds).
-        :param cv: Number of cross-validation folds (default 5).
-        :param scoring: Scoring method for cross-validation (default "accuracy" for classifiers and "r2" for regressors).
-        :param cv_timeout: Timeout for a single cv process within a trial (default 120).
-        :param random_state: Random state for reproducibility (default None).
+        Initialize the universal optimizer.
+
+        Parameters
+        ----------
+        algorithm : str, default='SVC'
+            Machine learning algorithm to optimize
+        direction : str, default='maximize'
+            Optimization direction ('maximize' or 'minimize')
+        verbose : bool or int, default=False
+            Verbosity level
+        show_progress_bar : bool, default=False
+            Whether to show progress bar
+        n_trials : int, default=100
+            Number of optimization trials
+        timeout : float or None, default=None
+            Maximum time for optimization
+        cv : int, default=5
+            Number of CV folds
+        scoring : str or None, default=None
+            Scoring method (defaults to 'accuracy' for classifiers, 'r2' for regressors)
+        cv_timeout : float, default=120
+            Timeout for single CV evaluation
+        random_state : int or None, default=None
+            Random state for reproducibility
+        early_stopping_patience : int or None, default=None
+            Patience for early stopping
+        n_jobs : int, default=1
+            Number of parallel jobs
         """
+        # Add CatBoost and XGBoost to supported algorithms if available
+        if CATBOOST_AVAILABLE:
+            self.SUPPORTED_ALGORITHMS.extend(["CatBoostClassifier", "CatBoostRegressor"])
+            self.CLASSIFIER_ALGORITHMS.append("CatBoostClassifier")
+        if XGBOOST_AVAILABLE:
+            self.SUPPORTED_ALGORITHMS.extend(["XGBClassifier", "XGBRegressor"])
+            self.CLASSIFIER_ALGORITHMS.append("XGBClassifier")
+
         if algorithm not in self.SUPPORTED_ALGORITHMS:
-            raise ValueError(f"Algorithm {algorithm} is not supported.")
+            available = ", ".join(self.SUPPORTED_ALGORITHMS)
+            raise ValueError(f"Algorithm {algorithm} not supported. Available: {available}")
+
         self.algorithm = algorithm
+
+        # Auto-select scoring if not provided
+        if scoring is None:
+            if algorithm in self.CLASSIFIER_ALGORITHMS:
+                scoring = "accuracy"
+            else:
+                scoring = "r2"
+
+        # Create the appropriate optimizer
+        if algorithm in self.CLASSIFIER_ALGORITHMS:
+            self._optimizer = ClassifierOptimizer(
+                algorithm=algorithm,
+                direction=direction,
+                verbose=verbose,
+                show_progress_bar=show_progress_bar,
+                n_trials=n_trials,
+                timeout=timeout,
+                cv=cv,
+                scoring=scoring,
+                cv_timeout=cv_timeout,
+                random_state=random_state,
+                early_stopping_patience=early_stopping_patience,
+                n_jobs=n_jobs,
+            )
+            self._estimator_type = "classifier"
+        else:
+            self._optimizer = RegressorOptimizer(
+                algorithm=algorithm,
+                direction=direction,
+                verbose=verbose,
+                show_progress_bar=show_progress_bar,
+                n_trials=n_trials,
+                timeout=timeout,
+                cv=cv,
+                scoring=scoring,
+                cv_timeout=cv_timeout,
+                random_state=random_state,
+                early_stopping_patience=early_stopping_patience,
+                n_jobs=n_jobs,
+            )
+            self._estimator_type = "regressor"
+
+        # Store all parameters for get_params
         self.direction = direction
         self.verbose = verbose
         self.show_progress_bar = show_progress_bar
         self.n_trials = n_trials
         self.timeout = timeout
         self.cv = cv
+        self.scoring = scoring
         self.cv_timeout = cv_timeout
         self.random_state = random_state
-        self.best_params_ = None
-        self.best_estimator_ = None
-        self.best_score_ = None
-        self.study_time_ = None
-
-        # Set default scoring method based on algorithm type
-        if scoring is None:
-            if self.algorithm in self.CLASSIFIER_ALGORITHMS:
-                self.scoring = "accuracy"
-            else:
-                self.scoring = "r2"
-        else:
-            self.scoring = scoring
-
-        # Set Optuna logging verbosity
-        if isinstance(verbose, bool):
-            optuna.logging.set_verbosity(optuna.logging.INFO if verbose else optuna.logging.WARNING)
-        elif isinstance(verbose, int):
-            optuna.logging.set_verbosity(verbose)
-
-        # Suppress warnings
-        warnings.filterwarnings("ignore", category=UserWarning)
-
-    def _cross_val_with_timeout(self, model, X, y, cv, scoring):
-        """
-        Perform cross-validation with timeout protection.
-        Returns NaN if timeout occurs or if an error is raised.
-        """
-
-        @timeout(dec_timeout=self.cv_timeout, use_signals=True, timeout_exception=optuna.TrialPruned)
-        def _wrapped_cross_val():
-            return cross_val_score(model, X, y, cv=cv, scoring=scoring, error_score="raise")
-
-        try:
-            return _wrapped_cross_val()
-        except (optuna.TrialPruned, KeyboardInterrupt):
-            # Timeout occurred or keyboard interrupt (for CatBoost)
-            if self.verbose:
-                print(f"Cross-validation for {self.algorithm} model timed out after {self.cv_timeout} seconds.")
-            raise optuna.TrialPruned()
-        except Exception as e:
-            # Other errors during cross-validation
-            if self.verbose:
-                print(f"Cross-validation failed with exception: {e}")
-            raise optuna.TrialPruned()
-
-    def _objective(self, trial, X, y):
-        """Objective function for Optuna optimization"""
-
-        # Define the model based on the algorithm
-        if self.algorithm == "SVC":
-            C = trial.suggest_float("C", 1e-2, 1e2, log=True)
-            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
-            kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
-            model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=True)
-
-        elif self.algorithm == "SVR":
-            C = trial.suggest_float("C", 1e-2, 1e2, log=True)
-            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
-            kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
-            model = SVR(C=C, gamma=gamma, kernel=kernel)
-
-        elif self.algorithm == "KNeighborsClassifier":
-            n_neighbors = trial.suggest_int("n_neighbors", 1, 20)
-            weights = trial.suggest_categorical("weights", ["uniform", "distance"])
-            p = trial.suggest_int("p", 1, 2)
-            model = KNeighborsClassifier(n_neighbors=n_neighbors, weights=weights, p=p)
-
-        elif self.algorithm == "KNeighborsRegressor":
-            n_neighbors = trial.suggest_int("n_neighbors", 1, 20)
-            weights = trial.suggest_categorical("weights", ["uniform", "distance"])
-            p = trial.suggest_int("p", 1, 2)
-            model = KNeighborsRegressor(n_neighbors=n_neighbors, weights=weights, p=p)
-
-        elif self.algorithm == "RandomForestClassifier":
-            n_estimators = trial.suggest_int("n_estimators", 10, 200)
-            max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
-            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
-            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
-            model = RandomForestClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                min_samples_split=min_samples_split,
-                min_samples_leaf=min_samples_leaf,
-                random_state=self.random_state,
-            )
-
-        elif self.algorithm == "RandomForestRegressor":
-            n_estimators = trial.suggest_int("n_estimators", 10, 200)
-            max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
-            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
-            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
-            model = RandomForestRegressor(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                min_samples_split=min_samples_split,
-                min_samples_leaf=min_samples_leaf,
-                random_state=self.random_state,
-            )
-
-        elif self.algorithm == "AdaBoostClassifier":
-            n_estimators = trial.suggest_int("n_estimators", 50, 200)
-            learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
-            algorithm = trial.suggest_categorical("algorithm", ["SAMME", "SAMME.R"])
-            model = AdaBoostClassifier(
-                n_estimators=n_estimators, learning_rate=learning_rate, algorithm=algorithm, random_state=self.random_state
-            )
-
-        elif self.algorithm == "AdaBoostRegressor":
-            n_estimators = trial.suggest_int("n_estimators", 50, 200)
-            learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
-            model = AdaBoostRegressor(n_estimators=n_estimators, learning_rate=learning_rate, random_state=self.random_state)
-
-        elif self.algorithm == "MLPClassifier":
-            hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 100)])
-            activation = trial.suggest_categorical("activation", ["tanh", "relu"])
-            solver = trial.suggest_categorical("solver", ["adam", "sgd"])
-            model = MLPClassifier(hidden_layer_sizes=hidden_layer_sizes, activation=activation, solver=solver, random_state=self.random_state)
-
-        elif self.algorithm == "MLPRegressor":
-            hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 100)])
-            activation = trial.suggest_categorical("activation", ["tanh", "relu"])
-            solver = trial.suggest_categorical("solver", ["adam", "sgd"])
-            model = MLPRegressor(hidden_layer_sizes=hidden_layer_sizes, activation=activation, solver=solver, random_state=self.random_state)
-
-        elif self.algorithm == "GaussianNB":
-            var_smoothing = trial.suggest_float("var_smoothing", 1e-10, 1e-5, log=True)
-            model = GaussianNB(var_smoothing=var_smoothing)
-
-        elif self.algorithm == "QDA":
-            reg_param = trial.suggest_float("reg_param", 0.0, 1.0)
-            model = QDA(reg_param=reg_param)
-
-        elif self.algorithm == "CatBoostClassifier":
-            depth = trial.suggest_int("depth", 4, 10)
-            learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
-            l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
-            iterations = trial.suggest_int("iterations", 100, 1000, step=50)
-            model = CatBoostClassifier(
-                depth=depth,
-                learning_rate=learning_rate,
-                l2_leaf_reg=l2_leaf_reg,
-                iterations=iterations,
-                random_state=self.random_state,
-                verbose=False,
-            )
-
-        elif self.algorithm == "CatBoostRegressor":
-            depth = trial.suggest_int("depth", 4, 10)
-            learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
-            l2_leaf_reg = trial.suggest_float("l2_leaf_reg", 1e-3, 10.0, log=True)
-            iterations = trial.suggest_int("iterations", 100, 1000, step=50)
-            model = CatBoostRegressor(
-                depth=depth,
-                learning_rate=learning_rate,
-                l2_leaf_reg=l2_leaf_reg,
-                iterations=iterations,
-                random_state=self.random_state,
-                verbose=False,
-            )
-
-        elif self.algorithm == "XGBClassifier":
-            n_estimators = trial.suggest_int("n_estimators", 50, 500)
-            max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
-            learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
-            subsample = trial.suggest_float("subsample", 0.5, 1.0)
-            colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
-            model = XGBClassifier(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                subsample=subsample,
-                colsample_bytree=colsample_bytree,
-                random_state=self.random_state,
-                use_label_encoder=False,
-                eval_metric="logloss",
-            )
-
-        elif self.algorithm == "XGBRegressor":
-            n_estimators = trial.suggest_int("n_estimators", 50, 500)
-            max_depth = trial.suggest_int("max_depth", 2, 32, log=True)
-            learning_rate = trial.suggest_float("learning_rate", 1e-4, 1.0, log=True)
-            subsample = trial.suggest_float("subsample", 0.5, 1.0)
-            colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
-            model = XGBRegressor(
-                n_estimators=n_estimators,
-                max_depth=max_depth,
-                learning_rate=learning_rate,
-                subsample=subsample,
-                colsample_bytree=colsample_bytree,
-                random_state=self.random_state,
-            )
-
-        else:
-            raise ValueError(f"Algorithm {self.algorithm} is not supported.")
-
-        # Perform cross-validation and return the mean score
-        scores = self._cross_val_with_timeout(model, X, y, cv=self.cv, scoring=self.scoring)
-        return scores.mean()
+        self.early_stopping_patience = early_stopping_patience
+        self.n_jobs = n_jobs
 
     def fit(self, X, y):
-        """Fit the chosen ML model with hyperparameter optimization."""
-        start_time = time.time()
-        study = optuna.create_study(direction=self.direction)
-        study.optimize(
-            lambda trial: self._objective(trial, X, y),
-            n_trials=self.n_trials,
-            timeout=self.timeout,
-            catch=(TimeoutError,),
-            show_progress_bar=self.show_progress_bar,
-        )
-        end_time = time.time()
+        """Fit the optimizer"""
+        self._optimizer.fit(X, y)
 
-        self.study_time_ = end_time - start_time
-        self.n_features_in_ = X.shape[1]
+        # Mirror all fitted attributes
+        self.best_params_ = self._optimizer.best_params_
+        self.best_estimator_ = self._optimizer.best_estimator_
+        self.best_score_ = self._optimizer.best_score_
+        self.study_time_ = self._optimizer.study_time_
+        self.study_ = self._optimizer.study_
+        self.n_trials_completed_ = self._optimizer.n_trials_completed_
+        self.n_features_in_ = self._optimizer.n_features_in_
+        self.n_outputs_ = self._optimizer.n_outputs_
 
-        if len(study.trials) == 0 or study.best_trial is None:
-            # No successful trials
-            raise RuntimeError(
-                "Optimization failed: No successful trials completed. "
-                "This may be due to: (1) all trials timing out, (2) all trials failing due to errors, "
-                "or (3) invalid hyperparameter configurations. "
-                "Try: increasing cv_timeout, reducing cv folds, or checking your data for issues."
-            )
+        if hasattr(self._optimizer, "classes_"):
+            self.classes_ = self._optimizer.classes_
+            self.n_classes_ = self._optimizer.n_classes_
 
-        self.best_params_ = study.best_params
-        self.best_score_ = study.best_value
-
-        # Set the best estimator based on the algorithm
-        if self.algorithm == "SVC":
-            self.best_estimator_ = SVC(**self.best_params_, random_state=self.random_state, probability=True)
-        elif self.algorithm == "SVR":
-            self.best_estimator_ = SVR(**self.best_params_)
-        elif self.algorithm == "KNeighborsClassifier":
-            self.best_estimator_ = KNeighborsClassifier(**self.best_params_)
-        elif self.algorithm == "KNeighborsRegressor":
-            self.best_estimator_ = KNeighborsRegressor(**self.best_params_)
-        elif self.algorithm == "RandomForestClassifier":
-            self.best_estimator_ = RandomForestClassifier(**self.best_params_, random_state=self.random_state)
-        elif self.algorithm == "RandomForestRegressor":
-            self.best_estimator_ = RandomForestRegressor(**self.best_params_, random_state=self.random_state)
-        elif self.algorithm == "AdaBoostClassifier":
-            self.best_estimator_ = AdaBoostClassifier(**self.best_params_, random_state=self.random_state)
-        elif self.algorithm == "AdaBoostRegressor":
-            self.best_estimator_ = AdaBoostRegressor(**self.best_params_, random_state=self.random_state)
-        elif self.algorithm == "MLPClassifier":
-            self.best_estimator_ = MLPClassifier(**self.best_params_, random_state=self.random_state)
-        elif self.algorithm == "MLPRegressor":
-            self.best_estimator_ = MLPRegressor(**self.best_params_, random_state=self.random_state)
-        elif self.algorithm == "GaussianNB":
-            self.best_estimator_ = GaussianNB(**self.best_params_)
-        elif self.algorithm == "QDA":
-            self.best_estimator_ = QDA(**self.best_params_)
-        elif self.algorithm == "CatBoostClassifier":
-            self.best_estimator_ = CatBoostClassifier(**self.best_params_, random_state=self.random_state, verbose=False)
-        elif self.algorithm == "CatBoostRegressor":
-            self.best_estimator_ = CatBoostRegressor(**self.best_params_, random_state=self.random_state, verbose=False)
-        elif self.algorithm == "XGBClassifier":
-            self.best_estimator_ = XGBClassifier(
-                **self.best_params_, random_state=self.random_state, use_label_encoder=False, eval_metric="logloss"
-            )
-        elif self.algorithm == "XGBRegressor":
-            self.best_estimator_ = XGBRegressor(**self.best_params_, random_state=self.random_state)
-        else:
-            raise ValueError(f"Algorithm {self.algorithm} is not supported.")
-
-        # Capture feature names if input is a DataFrame
-        if hasattr(X, "columns"):
-            self.feature_names_in_ = np.array(X.columns)
-
-        # Fit the best estimator on the full dataset
-        self.best_estimator_.fit(X, y)
-
-        # Set classes_ attribute for classifiers (must be done after fitting)
-        if self.algorithm in self.CLASSIFIER_ALGORITHMS:
-            self.classes_ = self.best_estimator_.classes_
-
-        # Set n_outputs_ for sklearn compatibility
-        self.n_outputs_ = 1 if y.ndim == 1 else y.shape[1]
+        if hasattr(self._optimizer, "feature_names_in_"):
+            self.feature_names_in_ = self._optimizer.feature_names_in_
 
         return self
 
     def predict(self, X):
-        """Make predictions using the best estimator"""
-        # For classifiers, check for classes_ attribute
-        if self.algorithm in self.CLASSIFIER_ALGORITHMS:
-            check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
-        else:
-            check_is_fitted(self, ["best_estimator_", "n_features_in_"])
-
-        if self.best_estimator_ is None:
-            raise AttributeError("Estimator has not been fitted yet.")
-        return self.best_estimator_.predict(X)
+        """Make predictions"""
+        return self._optimizer.predict(X)
 
     def predict_proba(self, X):
-        """Get probability estimates using the best estimator"""
-        # Only classifiers should have classes_
-        check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
+        """Get probability estimates (classifiers only)"""
+        if self._estimator_type != "classifier":
+            raise AttributeError(f"{self.algorithm} does not support probability predictions. " "This method is only available for classifiers.")
+        return self._optimizer.predict_proba(X)
 
-        if self.best_estimator_ is None:
-            raise AttributeError("Estimator has not been fitted yet.")
-
-        if not hasattr(self.best_estimator_, "predict_proba"):
-            raise AttributeError(
-                f"{self.algorithm} does not support probability predictions. " f"This method is only available for classifiers."
-            )
-
-        return self.best_estimator_.predict_proba(X)
+    def decision_function(self, X):
+        """Get decision function values (some classifiers only)"""
+        if self._estimator_type != "classifier":
+            raise AttributeError(f"{self.algorithm} does not have decision_function. " "This method is only available for some classifiers.")
+        return self._optimizer.decision_function(X)
 
     def score(self, X, y):
-        """Return the score of the model on the test data based on the selected scoring method"""
-        check_is_fitted(self, ["best_estimator_", "n_features_in_"])
+        """Return the score of the model on the test data"""
+        return self._optimizer.score(X, y)
 
-        if self.best_estimator_ is None:
-            raise AttributeError("Estimator has not been fitted yet.")
-        return self.best_estimator_.score(X, y)
+    def get_params(self, deep=True):
+        """Get parameters for this estimator"""
+        return {
+            "algorithm": self.algorithm,
+            "direction": self.direction,
+            "verbose": self.verbose,
+            "show_progress_bar": self.show_progress_bar,
+            "n_trials": self.n_trials,
+            "timeout": self.timeout,
+            "cv": self.cv,
+            "scoring": self.scoring,
+            "cv_timeout": self.cv_timeout,
+            "random_state": self.random_state,
+            "early_stopping_patience": self.early_stopping_patience,
+            "n_jobs": self.n_jobs,
+        }
+
+    def set_params(self, **params):
+        """Set parameters for this estimator"""
+        # Handle algorithm change specially as it might require recreating the optimizer
+        if "algorithm" in params and params["algorithm"] != self.algorithm:
+            # Need to recreate the optimizer with new algorithm
+            algorithm = params.pop("algorithm")
+            self.__init__(algorithm=algorithm, **params)
+        else:
+            # Update existing parameters
+            for key, value in params.items():
+                if hasattr(self, key):
+                    setattr(self, key, value)
+                    # Also update the internal optimizer
+                    if hasattr(self._optimizer, key):
+                        setattr(self._optimizer, key, value)
+
+            # Re-validate parameters in the internal optimizer
+            self._optimizer._validate_params()
+            self._optimizer._set_optuna_verbosity()
+
+        return self

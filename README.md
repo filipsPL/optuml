@@ -392,6 +392,10 @@ pip install catboost xgboost
    Optimizer(n_jobs=-1)
    ```
 
+## Benchmark
+
+See [this page](benchmark/benchmark.md) for benchmark results.
+
 ## Citation
 
 If you use OptuML in your research, please cite:

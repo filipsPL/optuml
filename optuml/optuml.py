@@ -5,11 +5,8 @@ A scikit-learn compatible optimizer for automatic hyperparameter tuning
 
 import optuna
 import numpy as np
-import pandas as pd
 import time
-import warnings
-import platform
-from typing import Optional, Union, Any, Dict, Tuple
+from typing import Optional, Union
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 # Sklearn imports
@@ -42,6 +39,29 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
+
+
+def _make_logistic_regression(**kwargs):
+    """Create LogisticRegression with sklearn version compatibility.
+
+    sklearn >= 1.8 deprecated 'penalty' in favor of 'l1_ratio' + 'C'.
+    Older sklearn requires 'penalty' and only accepts 'l1_ratio' with
+    penalty='elasticnet'.
+    """
+    try:
+        # sklearn >= 1.8: use l1_ratio directly, no penalty param
+        return LogisticRegression(**kwargs)
+    except TypeError:
+        # sklearn < 1.8: translate l1_ratio back to penalty
+        l1_ratio = kwargs.pop("l1_ratio", 0.0)
+        if l1_ratio == 0.0:
+            kwargs["penalty"] = "l2"
+        elif l1_ratio == 1.0:
+            kwargs["penalty"] = "l1"
+        else:
+            kwargs["penalty"] = "elasticnet"
+            kwargs["l1_ratio"] = l1_ratio
+        return LogisticRegression(**kwargs)
 
 
 class OptimizerBase(BaseEstimator):
@@ -105,23 +125,11 @@ class OptimizerBase(BaseEstimator):
         self.early_stopping_patience = early_stopping_patience
         self.n_jobs = n_jobs
 
-        # Attributes to be set during fitting
-        self.best_params_ = None
-        self.best_estimator_ = None
-        self.best_score_ = None
-        self.study_time_ = None
-        self.study_ = None
-        self.n_trials_completed_ = None
-
         # Validate parameters
         self._validate_params()
 
         # Set Optuna logging verbosity
         self._set_optuna_verbosity()
-
-        # Suppress warnings if not verbose
-        if not verbose:
-            warnings.filterwarnings("ignore", category=UserWarning)
 
     def _validate_params(self):
         """Validate initialization parameters"""
@@ -254,7 +262,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
     _estimator_type = "classifier"
 
-    SUPPORTED_ALGORITHMS = [
+    _BASE_ALGORITHMS = (
         "SVC",
         "KNeighborsClassifier",
         "RandomForestClassifier",
@@ -264,18 +272,23 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         "QDA",
         "LogisticRegression",
         "DecisionTreeClassifier",
-    ]
+    )
+
+    @classmethod
+    def _get_supported_algorithms(cls):
+        """Return supported algorithms including optional ones."""
+        algos = list(cls._BASE_ALGORITHMS)
+        if CATBOOST_AVAILABLE:
+            algos.append("CatBoostClassifier")
+        if XGBOOST_AVAILABLE:
+            algos.append("XGBClassifier")
+        return algos
 
     def __init__(self, algorithm="SVC", scoring="accuracy", **kwargs):
         """Initialize classifier optimizer with default scoring"""
-        # Add CatBoost and XGBoost if available
-        if CATBOOST_AVAILABLE and algorithm == "CatBoostClassifier":
-            self.SUPPORTED_ALGORITHMS.append("CatBoostClassifier")
-        if XGBOOST_AVAILABLE and algorithm == "XGBClassifier":
-            self.SUPPORTED_ALGORITHMS.append("XGBClassifier")
-
-        if algorithm not in self.SUPPORTED_ALGORITHMS:
-            available = ", ".join(self.SUPPORTED_ALGORITHMS)
+        supported = self._get_supported_algorithms()
+        if algorithm not in supported:
+            available = ", ".join(supported)
             raise ValueError(f"Algorithm {algorithm} not supported. Available: {available}")
 
         super().__init__(algorithm=algorithm, scoring=scoring, **kwargs)
@@ -286,9 +299,12 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         # Model selection and hyperparameter suggestions
         if self.algorithm == "SVC":
             C = trial.suggest_float("C", 1e-2, 1e2, log=True)
-            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
             kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
-            model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=True)
+            if kernel != "linear":
+                gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
+                model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=True)
+            else:
+                model = SVC(C=C, kernel=kernel, random_state=self.random_state, probability=True)
 
         elif self.algorithm == "KNeighborsClassifier":
             n_neighbors = trial.suggest_int("n_neighbors", 1, min(20, len(y) // 2))
@@ -314,11 +330,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         elif self.algorithm == "AdaBoostClassifier":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
-            ada_algorithm = trial.suggest_categorical("ada_algorithm", ["SAMME", "SAMME.R"])
             model = AdaBoostClassifier(
                 n_estimators=n_estimators,
                 learning_rate=learning_rate,
-                algorithm=ada_algorithm,  # Fixed: no more parameter collision
                 random_state=self.random_state,
             )
 
@@ -327,17 +341,18 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             activation = trial.suggest_categorical("activation", ["tanh", "relu", "logistic"])
             solver = trial.suggest_categorical("solver", ["adam", "sgd", "lbfgs"])
             alpha = trial.suggest_float("alpha", 1e-5, 1e-1, log=True)
-            learning_rate = trial.suggest_categorical("learning_rate", ["constant", "adaptive"])
-            model = MLPClassifier(
+            mlp_params = dict(
                 hidden_layer_sizes=hidden_layer_sizes,
                 activation=activation,
                 solver=solver,
                 alpha=alpha,
-                learning_rate=learning_rate,
                 random_state=self.random_state,
                 max_iter=1000,
                 early_stopping=True,
             )
+            if solver == "sgd":
+                mlp_params["learning_rate"] = trial.suggest_categorical("learning_rate", ["constant", "adaptive"])
+            model = MLPClassifier(**mlp_params)
 
         elif self.algorithm == "GaussianNB":
             var_smoothing = trial.suggest_float("var_smoothing", 1e-10, 1e-5, log=True)
@@ -349,25 +364,22 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
         elif self.algorithm == "LogisticRegression":
             C = trial.suggest_float("C", 1e-4, 1e2, log=True)
-            penalty = trial.suggest_categorical("penalty", ["l2", "l1", "elasticnet", "none"])
+            solver = trial.suggest_categorical("solver", ["lbfgs", "newton-cg", "saga"])
 
-            # Solver selection based on penalty
-            if penalty == "l1":
-                solver = "liblinear"
-            elif penalty == "elasticnet":
-                solver = "saga"
+            # Only saga supports elastic net (l1_ratio between 0 and 1)
+            # lbfgs/newton-cg only support l2 (l1_ratio=0)
+            if solver == "saga":
                 l1_ratio = trial.suggest_float("l1_ratio", 0.0, 1.0)
-                model = LogisticRegression(C=C, penalty=penalty, solver=solver, l1_ratio=l1_ratio, random_state=self.random_state, max_iter=1000)
-            elif penalty == "none":
-                solver = trial.suggest_categorical("solver", ["lbfgs", "newton-cg", "saga"])
-                model = LogisticRegression(C=C, penalty=penalty, solver=solver, random_state=self.random_state, max_iter=1000)
-            else:  # l2
-                solver = trial.suggest_categorical("solver", ["lbfgs", "liblinear", "saga"])
-                model = LogisticRegression(C=C, penalty=penalty, solver=solver, random_state=self.random_state, max_iter=1000)
+            else:
+                l1_ratio = 0.0
 
-            # Handle special case for elasticnet which was created above
-            if penalty != "elasticnet":
-                model = LogisticRegression(C=C, penalty=penalty, solver=solver, random_state=self.random_state, max_iter=1000)
+            model = _make_logistic_regression(
+                C=C,
+                l1_ratio=l1_ratio,
+                solver=solver,
+                random_state=self.random_state,
+                max_iter=1000,
+            )
 
         elif self.algorithm == "DecisionTreeClassifier":
             max_depth = trial.suggest_int("max_depth", 2, 32)
@@ -420,7 +432,6 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 reg_alpha=reg_alpha,
                 reg_lambda=reg_lambda,
                 random_state=self.random_state,
-                use_label_encoder=False,
                 eval_metric="logloss",
                 verbosity=0,
             )
@@ -448,6 +459,10 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         self : object
             Fitted estimator
         """
+        # Store feature names before check_X_y converts DataFrame to numpy
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = np.array(X.columns)
+
         # Validate input - handle sklearn version compatibility
         try:
             # Try new parameter name first (sklearn >= 1.6)
@@ -458,8 +473,6 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
         # Store feature information
         self.n_features_in_ = X.shape[1]
-        if hasattr(X, "columns"):
-            self.feature_names_in_ = np.array(X.columns)
 
         # Create and run the study
         start_time = time.time()
@@ -517,9 +530,6 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         elif self.algorithm == "RandomForestClassifier":
             self.best_estimator_ = RandomForestClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "AdaBoostClassifier":
-            # Fix parameter name for AdaBoost
-            if "ada_algorithm" in params:
-                params["algorithm"] = params.pop("ada_algorithm")
             self.best_estimator_ = AdaBoostClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "MLPClassifier":
             self.best_estimator_ = MLPClassifier(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
@@ -528,17 +538,13 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         elif self.algorithm == "QDA":
             self.best_estimator_ = QDA(**params)
         elif self.algorithm == "LogisticRegression":
-            if "l1_ratio" not in params:
-                params["l1_ratio"] = None
-            self.best_estimator_ = LogisticRegression(**params, random_state=self.random_state, max_iter=1000)
+            self.best_estimator_ = _make_logistic_regression(**params, random_state=self.random_state, max_iter=1000)
         elif self.algorithm == "DecisionTreeClassifier":
             self.best_estimator_ = DecisionTreeClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "CatBoostClassifier" and CATBOOST_AVAILABLE:
             self.best_estimator_ = CatBoostClassifier(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
         elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
-            self.best_estimator_ = XGBClassifier(
-                **params, random_state=self.random_state, use_label_encoder=False, eval_metric="logloss", verbosity=0
-            )
+            self.best_estimator_ = XGBClassifier(**params, random_state=self.random_state, eval_metric="logloss", verbosity=0)
 
     def predict(self, X):
         """Make predictions using the best estimator"""
@@ -578,7 +584,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
 
     _estimator_type = "regressor"
 
-    SUPPORTED_ALGORITHMS = [
+    _BASE_ALGORITHMS = (
         "SVR",
         "KNeighborsRegressor",
         "RandomForestRegressor",
@@ -586,18 +592,23 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         "MLPRegressor",
         "LinearRegression",
         "DecisionTreeRegressor",
-    ]
+    )
+
+    @classmethod
+    def _get_supported_algorithms(cls):
+        """Return supported algorithms including optional ones."""
+        algos = list(cls._BASE_ALGORITHMS)
+        if CATBOOST_AVAILABLE:
+            algos.append("CatBoostRegressor")
+        if XGBOOST_AVAILABLE:
+            algos.append("XGBRegressor")
+        return algos
 
     def __init__(self, algorithm="SVR", scoring="r2", **kwargs):
         """Initialize regressor optimizer with default scoring"""
-        # Add CatBoost and XGBoost if available
-        if CATBOOST_AVAILABLE and algorithm == "CatBoostRegressor":
-            self.SUPPORTED_ALGORITHMS.append("CatBoostRegressor")
-        if XGBOOST_AVAILABLE and algorithm == "XGBRegressor":
-            self.SUPPORTED_ALGORITHMS.append("XGBRegressor")
-
-        if algorithm not in self.SUPPORTED_ALGORITHMS:
-            available = ", ".join(self.SUPPORTED_ALGORITHMS)
+        supported = self._get_supported_algorithms()
+        if algorithm not in supported:
+            available = ", ".join(supported)
             raise ValueError(f"Algorithm {algorithm} not supported. Available: {available}")
 
         super().__init__(algorithm=algorithm, scoring=scoring, **kwargs)
@@ -609,9 +620,12 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         if self.algorithm == "SVR":
             C = trial.suggest_float("C", 1e-2, 1e2, log=True)
             epsilon = trial.suggest_float("epsilon", 1e-4, 1.0, log=True)
-            gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
             kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
-            model = SVR(C=C, epsilon=epsilon, gamma=gamma, kernel=kernel)
+            if kernel != "linear":
+                gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
+                model = SVR(C=C, epsilon=epsilon, gamma=gamma, kernel=kernel)
+            else:
+                model = SVR(C=C, epsilon=epsilon, kernel=kernel)
 
         elif self.algorithm == "KNeighborsRegressor":
             n_neighbors = trial.suggest_int("n_neighbors", 1, min(20, len(y) // 2))
@@ -645,17 +659,18 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             activation = trial.suggest_categorical("activation", ["tanh", "relu", "logistic"])
             solver = trial.suggest_categorical("solver", ["adam", "sgd", "lbfgs"])
             alpha = trial.suggest_float("alpha", 1e-5, 1e-1, log=True)
-            learning_rate = trial.suggest_categorical("learning_rate", ["constant", "adaptive"])
-            model = MLPRegressor(
+            mlp_params = dict(
                 hidden_layer_sizes=hidden_layer_sizes,
                 activation=activation,
                 solver=solver,
                 alpha=alpha,
-                learning_rate=learning_rate,
                 random_state=self.random_state,
                 max_iter=1000,
                 early_stopping=True,
             )
+            if solver == "sgd":
+                mlp_params["learning_rate"] = trial.suggest_categorical("learning_rate", ["constant", "adaptive"])
+            model = MLPRegressor(**mlp_params)
 
         elif self.algorithm == "LinearRegression":
             fit_intercept = trial.suggest_categorical("fit_intercept", [True, False])
@@ -665,7 +680,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             max_depth = trial.suggest_int("max_depth", 2, 32)
             min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
-            criterion = trial.suggest_categorical("criterion", ["squared_error", "friedman_mse", "absolute_error", "poisson"])
+            criterion = trial.suggest_categorical("criterion", ["squared_error", "friedman_mse", "absolute_error"])
             max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
             model = DecisionTreeRegressor(
                 max_depth=max_depth,
@@ -738,8 +753,11 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         self : object
             Fitted estimator
         """
-        # Validate input
-        # X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True, y_numeric=True)
+        # Store feature names before check_X_y converts DataFrame to numpy
+        if hasattr(X, "columns"):
+            self.feature_names_in_ = np.array(X.columns)
+
+        # Validate input - handle sklearn version compatibility
         try:
             # Try new parameter name first (sklearn >= 1.6)
             X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True, y_numeric=True)
@@ -749,8 +767,6 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
 
         # Store feature information
         self.n_features_in_ = X.shape[1]
-        if hasattr(X, "columns"):
-            self.feature_names_in_ = np.array(X.columns)
 
         # Create and run the study
         start_time = time.time()
@@ -839,40 +855,15 @@ class Optimizer(BaseEstimator):
     original API while providing proper separation between classifiers and regressors.
     """
 
-    # Combined list of all supported algorithms
-    SUPPORTED_ALGORITHMS = [
-        # Classifiers
-        "SVC",
-        "KNeighborsClassifier",
-        "RandomForestClassifier",
-        "AdaBoostClassifier",
-        "MLPClassifier",
-        "GaussianNB",
-        "QDA",
-        "LogisticRegression",
-        "DecisionTreeClassifier",
-        # Regressors
-        "SVR",
-        "KNeighborsRegressor",
-        "RandomForestRegressor",
-        "AdaBoostRegressor",
-        "MLPRegressor",
-        "LinearRegression",
-        "DecisionTreeRegressor",
-    ]
+    @staticmethod
+    def _get_supported_algorithms():
+        """Return all supported algorithms including optional ones."""
+        return ClassifierOptimizer._get_supported_algorithms() + RegressorOptimizer._get_supported_algorithms()
 
-    # Define which algorithms are classifiers
-    CLASSIFIER_ALGORITHMS = [
-        "SVC",
-        "KNeighborsClassifier",
-        "RandomForestClassifier",
-        "AdaBoostClassifier",
-        "MLPClassifier",
-        "GaussianNB",
-        "QDA",
-        "LogisticRegression",
-        "DecisionTreeClassifier",
-    ]
+    @staticmethod
+    def _get_classifier_algorithms():
+        """Return supported classifier algorithms."""
+        return ClassifierOptimizer._get_supported_algorithms()
 
     def __init__(
         self,
@@ -919,29 +910,22 @@ class Optimizer(BaseEstimator):
         n_jobs : int, default=1
             Number of parallel jobs
         """
-        # Add CatBoost and XGBoost to supported algorithms if available
-        if CATBOOST_AVAILABLE:
-            self.SUPPORTED_ALGORITHMS.extend(["CatBoostClassifier", "CatBoostRegressor"])
-            self.CLASSIFIER_ALGORITHMS.append("CatBoostClassifier")
-        if XGBOOST_AVAILABLE:
-            self.SUPPORTED_ALGORITHMS.extend(["XGBClassifier", "XGBRegressor"])
-            self.CLASSIFIER_ALGORITHMS.append("XGBClassifier")
-
-        if algorithm not in self.SUPPORTED_ALGORITHMS:
-            available = ", ".join(self.SUPPORTED_ALGORITHMS)
+        supported = self._get_supported_algorithms()
+        if algorithm not in supported:
+            available = ", ".join(supported)
             raise ValueError(f"Algorithm {algorithm} not supported. Available: {available}")
 
         self.algorithm = algorithm
 
         # Auto-select scoring if not provided
         if scoring is None:
-            if algorithm in self.CLASSIFIER_ALGORITHMS:
+            if algorithm in self._get_classifier_algorithms():
                 scoring = "accuracy"
             else:
                 scoring = "r2"
 
         # Create the appropriate optimizer
-        if algorithm in self.CLASSIFIER_ALGORITHMS:
+        if algorithm in self._get_classifier_algorithms():
             self._optimizer = ClassifierOptimizer(
                 algorithm=algorithm,
                 direction=direction,

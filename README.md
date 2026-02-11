@@ -36,6 +36,14 @@ Input                  optuml train                           Predict
 pip install optuml
 ```
 
+With optional algorithm support:
+
+```bash
+pip install optuml[all]       # CatBoost + XGBoost
+pip install optuml[catboost]  # CatBoost only
+pip install optuml[xgboost]  # XGBoost only
+```
+
 or upgrade:
 
 ```bash
@@ -46,7 +54,7 @@ pip install optuml --upgrade
 
 ```bash
 # Install required dependencies
-pip install optuna scikit-learn numpy pandas
+pip install optuna scikit-learn numpy
 
 # Optional: Install additional algorithms
 pip install catboost xgboost
@@ -131,7 +139,7 @@ print(f"R² Score: {r2:.3f}")
 | `LogisticRegression`     | Logistic Regression             | L1/L2/Elastic-Net regularization          |
 | `KNeighborsClassifier`   | k-Nearest Neighbors             | Distance weighting, various metrics       |
 | `RandomForestClassifier` | Random Forest                   | Feature importance, OOB score             |
-| `AdaBoostClassifier`     | AdaBoost                        | SAMME/SAMME.R algorithms                  |
+| `AdaBoostClassifier`     | AdaBoost                        | Boosted ensemble, learning rate tuning    |
 | `MLPClassifier`          | Neural Network                  | Multiple architectures, early stopping    |
 | `GaussianNB`             | Gaussian Naive Bayes            | Fast, probabilistic                       |
 | `QDA`                    | Quadratic Discriminant Analysis | Non-linear boundaries                     |
@@ -255,7 +263,7 @@ predictions = pipe.predict(X_test)
 For more control, use the specific optimizer classes:
 
 ```python
-from optuml import ClassifierOptimizer, RegressorOptimizer
+from optuml.optuml import ClassifierOptimizer, RegressorOptimizer
 
 # Classifier with all classifier-specific methods
 clf = ClassifierOptimizer(
@@ -343,6 +351,8 @@ optimizer = Optimizer(algorithm="SVC", cv_timeout=300, cv=3)
 ### Issue: CatBoost/XGBoost not available
 **Solution**: Install optional dependencies:
 ```bash
+pip install optuml[all]
+# or individually:
 pip install catboost xgboost
 ```
 

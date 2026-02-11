@@ -144,8 +144,10 @@ def test_optimizer_best_params_attribute(classification_data):
     assert optimizer.best_params_ is not None
     assert isinstance(optimizer.best_params_, dict)
     assert "C" in optimizer.best_params_
-    assert "gamma" in optimizer.best_params_
     assert "kernel" in optimizer.best_params_
+    # gamma is only present when kernel != "linear"
+    if optimizer.best_params_["kernel"] != "linear":
+        assert "gamma" in optimizer.best_params_
 
 
 # def test_optimizer_exception_handling(classification_data):
@@ -186,6 +188,7 @@ def test_optimizer_with_different_scoring(classification_data):
 
 def test_optimizer_timeout(classification_data):
     """Test that the optimizer respects the timeout parameter."""
+    pytest.importorskip("xgboost")
     X_train, X_test, y_train, y_test = classification_data
     optimizer = Optimizer(
         algorithm="XGBClassifier",
@@ -194,7 +197,7 @@ def test_optimizer_timeout(classification_data):
         random_state=42
     )
     optimizer.fit(X_train, y_train)
-    
+
     # The study should stop before completing all trials due to timeout
     assert optimizer.study_time_ <= 6  # Allowing a small buffer
 

@@ -22,10 +22,11 @@ setup(
     install_requires=[
         "optuna>=3.0.1",
         "scikit-learn",
-        "catboost",
-        "graphviz",   # Needed for CatBoost
-        "xgboost",
         "numpy",
-        "wrapt_timeout_decorator"
     ],
+    extras_require={
+        "catboost": ["catboost"],
+        "xgboost": ["xgboost"],
+        "all": ["catboost", "xgboost"],
+    },
 )

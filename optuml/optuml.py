@@ -128,9 +128,6 @@ class OptimizerBase(BaseEstimator):
         # Validate parameters
         self._validate_params()
 
-        # Set Optuna logging verbosity
-        self._set_optuna_verbosity()
-
     def _validate_params(self):
         """Validate initialization parameters"""
         if self.n_trials <= 0:
@@ -146,15 +143,13 @@ class OptimizerBase(BaseEstimator):
         if self.early_stopping_patience is not None and self.early_stopping_patience <= 0:
             raise ValueError("early_stopping_patience must be positive or None")
 
-    def _set_optuna_verbosity(self):
-        """Set Optuna logging verbosity level"""
+    def _get_optuna_verbosity_level(self):
+        """Resolve verbose setting to an Optuna logging level."""
         if isinstance(self.verbose, bool):
-            level = optuna.logging.INFO if self.verbose else optuna.logging.WARNING
-        elif isinstance(self.verbose, int):
-            level = self.verbose
-        else:
-            level = optuna.logging.WARNING
-        optuna.logging.set_verbosity(level)
+            return optuna.logging.INFO if self.verbose else optuna.logging.WARNING
+        if isinstance(self.verbose, int):
+            return self.verbose
+        return optuna.logging.WARNING
 
     def _cross_val_with_timeout(self, model, X, y):
         """
@@ -183,11 +178,11 @@ class OptimizerBase(BaseEstimator):
             except FutureTimeoutError:
                 if self.verbose:
                     print(f"Cross-validation timed out after {self.cv_timeout} seconds.")
-                raise optuna.TrialPruned()
+                raise optuna.TrialPruned(f"CV timed out after {self.cv_timeout}s")
             except Exception as e:
                 if self.verbose:
-                    print(f"Cross-validation failed: {e}")
-                raise optuna.TrialPruned()
+                    print(f"Cross-validation failed: {type(e).__name__}: {e}")
+                raise optuna.TrialPruned(f"CV failed: {type(e).__name__}: {e}")
 
     def _get_early_stopping_callback(self):
         """Create early stopping callback for Optuna"""
@@ -252,7 +247,6 @@ class OptimizerBase(BaseEstimator):
 
         # Re-validate parameters
         self._validate_params()
-        self._set_optuna_verbosity()
 
         return self
 
@@ -330,7 +324,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
         elif self.algorithm == "AdaBoostClassifier":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
-            learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 2.0, log=True)
             model = AdaBoostClassifier(
                 n_estimators=n_estimators,
                 learning_rate=learning_rate,
@@ -356,7 +350,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             model = MLPClassifier(**mlp_params)
 
         elif self.algorithm == "GaussianNB":
-            var_smoothing = trial.suggest_float("var_smoothing", 1e-10, 1e-5, log=True)
+            var_smoothing = trial.suggest_float("var_smoothing", 1e-10, 1e-2, log=True)
             model = GaussianNB(var_smoothing=var_smoothing)
 
         elif self.algorithm == "QDA":
@@ -487,15 +481,20 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         if early_stopping_callback:
             callbacks.append(early_stopping_callback)
 
-        # Optimize
-        self.study_.optimize(
-            lambda trial: self._objective(trial, X, y),
-            n_trials=self.n_trials,
-            timeout=self.timeout,
-            show_progress_bar=self.show_progress_bar,
-            callbacks=callbacks,
-            catch=(Exception,),
-        )
+        # Apply verbosity locally to avoid polluting other Optuna loggers in the same process.
+        _prev_verbosity = optuna.logging.get_verbosity()
+        optuna.logging.set_verbosity(self._get_optuna_verbosity_level())
+        try:
+            self.study_.optimize(
+                lambda trial: self._objective(trial, X, y),
+                n_trials=self.n_trials,
+                timeout=self.timeout,
+                show_progress_bar=self.show_progress_bar,
+                callbacks=callbacks,
+                catch=(Exception,),
+            )
+        finally:
+            optuna.logging.set_verbosity(_prev_verbosity)
 
         self.study_time_ = time.time() - start_time
         self.n_trials_completed_ = len(self.study_.trials)
@@ -503,7 +502,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         # Check if any trials succeeded
         if self.n_trials_completed_ == 0 or self.study_.best_trial is None:
             raise RuntimeError(
-                "Optimization failed: No successful trials completed. " "Try: increasing cv_timeout, reducing cv folds, or checking your data."
+                "Optimization failed: No successful trials completed. "
+                "Check pruned trial messages via study_.trials for the root cause "
+                "(common causes: wrong scoring for task type, cv_timeout too low, bad data)."
             )
 
         # Store best results
@@ -553,6 +554,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             self.best_estimator_ = CatBoostClassifier(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
         elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
             self.best_estimator_ = XGBClassifier(**params, random_state=self.random_state, eval_metric="logloss", verbosity=0)
+        else:
+            raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 
     def predict(self, X):
         """Make predictions using the best estimator"""
@@ -601,6 +604,9 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         "LinearRegression",
         "DecisionTreeRegressor",
     )
+
+    # Algorithms with no tunable hyperparameters: run only 1 Optuna trial.
+    _PARAMETER_FREE_ALGORITHMS = frozenset(["LinearRegression"])
 
     @classmethod
     def _get_supported_algorithms(cls):
@@ -659,7 +665,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
 
         elif self.algorithm == "AdaBoostRegressor":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
-            learning_rate = trial.suggest_float("learning_rate", 1e-3, 1.0, log=True)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 2.0, log=True)
             loss = trial.suggest_categorical("loss", ["linear", "square", "exponential"])
             model = AdaBoostRegressor(n_estimators=n_estimators, learning_rate=learning_rate, loss=loss, random_state=self.random_state)
 
@@ -790,15 +796,23 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         if early_stopping_callback:
             callbacks.append(early_stopping_callback)
 
-        # Optimize
-        self.study_.optimize(
-            lambda trial: self._objective(trial, X, y),
-            n_trials=self.n_trials,
-            timeout=self.timeout,
-            show_progress_bar=self.show_progress_bar,
-            callbacks=callbacks,
-            catch=(Exception,),
-        )
+        # Parameter-free algorithms have nothing to optimize: cap to 1 trial.
+        n_trials = 1 if self.algorithm in self._PARAMETER_FREE_ALGORITHMS else self.n_trials
+
+        # Apply verbosity locally to avoid polluting other Optuna loggers in the same process.
+        _prev_verbosity = optuna.logging.get_verbosity()
+        optuna.logging.set_verbosity(self._get_optuna_verbosity_level())
+        try:
+            self.study_.optimize(
+                lambda trial: self._objective(trial, X, y),
+                n_trials=n_trials,
+                timeout=self.timeout,
+                show_progress_bar=self.show_progress_bar,
+                callbacks=callbacks,
+                catch=(Exception,),
+            )
+        finally:
+            optuna.logging.set_verbosity(_prev_verbosity)
 
         self.study_time_ = time.time() - start_time
         self.n_trials_completed_ = len(self.study_.trials)
@@ -806,7 +820,9 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         # Check if any trials succeeded
         if self.n_trials_completed_ == 0 or self.study_.best_trial is None:
             raise RuntimeError(
-                "Optimization failed: No successful trials completed. " "Try: increasing cv_timeout, reducing cv folds, or checking your data."
+                "Optimization failed: No successful trials completed. "
+                "Check pruned trial messages via study_.trials for the root cause "
+                "(common causes: wrong scoring for task type, cv_timeout too low, bad data)."
             )
 
         # Store best results
@@ -850,6 +866,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             self.best_estimator_ = CatBoostRegressor(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
         elif self.algorithm == "XGBRegressor" and XGBOOST_AVAILABLE:
             self.best_estimator_ = XGBRegressor(**params, random_state=self.random_state, verbosity=0)
+        else:
+            raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 
     def predict(self, X):
         """Make predictions using the best estimator"""
@@ -1050,22 +1068,27 @@ class Optimizer(BaseEstimator):
 
     def set_params(self, **params):
         """Set parameters for this estimator"""
-        # Handle algorithm change specially as it might require recreating the optimizer
         if "algorithm" in params and params["algorithm"] != self.algorithm:
-            # Need to recreate the optimizer with new algorithm
-            algorithm = params.pop("algorithm")
-            self.__init__(algorithm=algorithm, **params)
+            # Changing algorithm requires recreating the internal optimizer.
+            # Merge current stored params with the caller's overrides so that
+            # previously set values (n_trials, cv, etc.) are preserved.
+            # Reset scoring to None so auto-selection fires for the new algorithm
+            # unless the caller explicitly provided a scoring value.
+            current = self.get_params()
+            current.pop("scoring")  # let __init__ auto-select unless overridden
+            current.update(params)
+            self.__init__(**current)
         else:
-            # Update existing parameters
+            # Update existing parameters on both this object and the internal optimizer.
             for key, value in params.items():
                 if hasattr(self, key):
                     setattr(self, key, value)
-                    # Also update the internal optimizer
-                    if hasattr(self._optimizer, key):
-                        setattr(self._optimizer, key, value)
+                else:
+                    raise ValueError(f"Invalid parameter '{key}' for estimator {type(self).__name__}.")
+                if hasattr(self._optimizer, key):
+                    setattr(self._optimizer, key, value)
 
-            # Re-validate parameters in the internal optimizer
+            # Re-validate parameters in the internal optimizer.
             self._optimizer._validate_params()
-            self._optimizer._set_optuna_verbosity()
 
         return self

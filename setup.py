@@ -27,6 +27,7 @@ setup(
     extras_require={
         "catboost": ["catboost"],
         "xgboost": ["xgboost"],
-        "all": ["catboost", "xgboost"],
+        "lightgbm": ["lightgbm"],
+        "all": ["catboost", "xgboost", "lightgbm"],
     },
 )

@@ -19,11 +19,14 @@ from sklearn.utils.multiclass import unique_labels
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, AdaBoostClassifier, AdaBoostRegressor
-from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, RidgeClassifier, Lasso, ElasticNet
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis as QDA
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
 
 # Optional imports for CatBoost and XGBoost
 try:
@@ -39,6 +42,13 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
+
+try:
+    from lightgbm import LGBMClassifier, LGBMRegressor
+
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
 
 
 def _make_logistic_regression(**kwargs):
@@ -151,6 +161,20 @@ class OptimizerBase(BaseEstimator):
             return self.verbose
         return optuna.logging.WARNING
 
+    def _fit_best_estimator(self, X, y):
+        """Fit best_estimator_ on full data, suppressing known LightGBM/sklearn warnings."""
+        if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
+            # LightGBM always stores auto-generated feature names (e.g. 'Column_0') even
+            # for numpy input, causing sklearn's feature-name validation warning at predict
+            # time. This is a known LightGBM/sklearn integration issue that cannot be fixed
+            # from outside (feature_names_in_ is a read-only property on LightGBM classes).
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
+                self.best_estimator_.fit(X, y)
+        else:
+            self.best_estimator_.fit(X, y)
+
     def _cross_val_with_timeout(self, model, X, y):
         """
         Perform cross-validation with timeout protection.
@@ -169,9 +193,16 @@ class OptimizerBase(BaseEstimator):
         scores : array
             Cross-validation scores
         """
+        def _run_cv():
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
+                    _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
+                return cross_val_score(model, X, y, cv=self.cv, scoring=self.scoring, n_jobs=self.n_jobs, error_score="raise")
+
         # Use ThreadPoolExecutor for timeout (works on all platforms)
         with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(cross_val_score, model, X, y, cv=self.cv, scoring=self.scoring, n_jobs=self.n_jobs, error_score="raise")
+            future = executor.submit(_run_cv)
             try:
                 scores = future.result(timeout=self.cv_timeout)
                 return scores
@@ -260,11 +291,15 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         "SVC",
         "KNeighborsClassifier",
         "RandomForestClassifier",
+        "ExtraTreesClassifier",
         "AdaBoostClassifier",
+        "GradientBoostingClassifier",
+        "HistGradientBoostingClassifier",
         "MLPClassifier",
         "GaussianNB",
         "QDA",
         "LogisticRegression",
+        "RidgeClassifier",
         "DecisionTreeClassifier",
     )
 
@@ -276,6 +311,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             algos.append("CatBoostClassifier")
         if XGBOOST_AVAILABLE:
             algos.append("XGBClassifier")
+        if LIGHTGBM_AVAILABLE:
+            algos.append("LGBMClassifier")
         return algos
 
     def __init__(self, algorithm="SVC", scoring="accuracy", **kwargs):
@@ -322,12 +359,61 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 random_state=self.random_state,
             )
 
+        elif self.algorithm == "ExtraTreesClassifier":
+            n_estimators = trial.suggest_int("n_estimators", 10, 200)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 32)
+            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = ExtraTreesClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
         elif self.algorithm == "AdaBoostClassifier":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 2.0, log=True)
             model = AdaBoostClassifier(
                 n_estimators=n_estimators,
                 learning_rate=learning_rate,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "GradientBoostingClassifier":
+            n_estimators = trial.suggest_int("n_estimators", 50, 500)
+            max_depth = trial.suggest_int("max_depth", 2, 10)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
+            subsample = trial.suggest_float("subsample", 0.5, 1.0)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = GradientBoostingClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                min_samples_leaf=min_samples_leaf,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "HistGradientBoostingClassifier":
+            max_iter = trial.suggest_int("max_iter", 50, 500)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 15)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 50)
+            l2_regularization = trial.suggest_float("l2_regularization", 0.0, 10.0)
+            model = HistGradientBoostingClassifier(
+                max_iter=max_iter,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                min_samples_leaf=min_samples_leaf,
+                l2_regularization=l2_regularization,
                 random_state=self.random_state,
             )
 
@@ -390,6 +476,32 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 criterion=criterion,
                 max_features=max_features,
                 random_state=self.random_state,
+            )
+
+        elif self.algorithm == "RidgeClassifier":
+            alpha = trial.suggest_float("alpha", 1e-4, 1e4, log=True)
+            model = RidgeClassifier(alpha=alpha, random_state=self.random_state)
+
+        elif self.algorithm == "LGBMClassifier" and LIGHTGBM_AVAILABLE:
+            n_estimators = trial.suggest_int("n_estimators", 50, 500)
+            max_depth = trial.suggest_int("max_depth", 2, 20)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
+            num_leaves = trial.suggest_int("num_leaves", 15, 127)
+            subsample = trial.suggest_float("subsample", 0.5, 1.0)
+            colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
+            reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True)
+            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True)
+            model = LGBMClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                num_leaves=num_leaves,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                reg_alpha=reg_alpha,
+                reg_lambda=reg_lambda,
+                random_state=self.random_state,
+                verbosity=-1,
             )
 
         elif self.algorithm == "CatBoostClassifier" and CATBOOST_AVAILABLE:
@@ -513,7 +625,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
         # Create and fit the best estimator
         self._create_best_estimator()
-        self.best_estimator_.fit(X, y)
+        self._fit_best_estimator(X, y)
 
         # Set classes_ for classifiers
         self.classes_ = unique_labels(y)
@@ -535,8 +647,20 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             if max_depth_none:
                 params.pop("max_depth", None)
             self.best_estimator_ = RandomForestClassifier(**params, random_state=self.random_state)
+        elif self.algorithm == "ExtraTreesClassifier":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
+            self.best_estimator_ = ExtraTreesClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "AdaBoostClassifier":
             self.best_estimator_ = AdaBoostClassifier(**params, random_state=self.random_state)
+        elif self.algorithm == "GradientBoostingClassifier":
+            self.best_estimator_ = GradientBoostingClassifier(**params, random_state=self.random_state)
+        elif self.algorithm == "HistGradientBoostingClassifier":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
+            self.best_estimator_ = HistGradientBoostingClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "MLPClassifier":
             self.best_estimator_ = MLPClassifier(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
         elif self.algorithm == "GaussianNB":
@@ -545,6 +669,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             self.best_estimator_ = QDA(**params)
         elif self.algorithm == "LogisticRegression":
             self.best_estimator_ = _make_logistic_regression(**params, random_state=self.random_state, max_iter=1000)
+        elif self.algorithm == "RidgeClassifier":
+            self.best_estimator_ = RidgeClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "DecisionTreeClassifier":
             max_depth_none = params.pop("max_depth_none", False)
             if max_depth_none:
@@ -554,6 +680,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             self.best_estimator_ = CatBoostClassifier(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
         elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
             self.best_estimator_ = XGBClassifier(**params, random_state=self.random_state, eval_metric="logloss", verbosity=0)
+        elif self.algorithm == "LGBMClassifier" and LIGHTGBM_AVAILABLE:
+            self.best_estimator_ = LGBMClassifier(**params, random_state=self.random_state, verbosity=-1)
         else:
             raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 
@@ -561,6 +689,11 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         """Make predictions using the best estimator"""
         check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
         X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
+                return self.best_estimator_.predict(X)
         return self.best_estimator_.predict(X)
 
     def predict_proba(self, X):
@@ -571,6 +704,11 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         if not hasattr(self.best_estimator_, "predict_proba"):
             raise AttributeError(f"{self.algorithm} does not support probability predictions")
 
+        if LIGHTGBM_AVAILABLE and self.algorithm == "LGBMClassifier":
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
+                return self.best_estimator_.predict_proba(X)
         return self.best_estimator_.predict_proba(X)
 
     def decision_function(self, X):
@@ -587,6 +725,11 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         """Return the mean accuracy on the given test data and labels"""
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
         X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True)
+        if LIGHTGBM_AVAILABLE and self.algorithm == "LGBMClassifier":
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
+                return self.best_estimator_.score(X, y)
         return self.best_estimator_.score(X, y)
 
 
@@ -599,9 +742,15 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         "SVR",
         "KNeighborsRegressor",
         "RandomForestRegressor",
+        "ExtraTreesRegressor",
         "AdaBoostRegressor",
+        "GradientBoostingRegressor",
+        "HistGradientBoostingRegressor",
         "MLPRegressor",
         "LinearRegression",
+        "Ridge",
+        "Lasso",
+        "ElasticNet",
         "DecisionTreeRegressor",
     )
 
@@ -616,6 +765,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             algos.append("CatBoostRegressor")
         if XGBOOST_AVAILABLE:
             algos.append("XGBRegressor")
+        if LIGHTGBM_AVAILABLE:
+            algos.append("LGBMRegressor")
         return algos
 
     def __init__(self, algorithm="SVR", scoring="r2", **kwargs):
@@ -663,11 +814,60 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
                 random_state=self.random_state,
             )
 
+        elif self.algorithm == "ExtraTreesRegressor":
+            n_estimators = trial.suggest_int("n_estimators", 10, 200)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 32)
+            min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = ExtraTreesRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
         elif self.algorithm == "AdaBoostRegressor":
             n_estimators = trial.suggest_int("n_estimators", 50, 200)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 2.0, log=True)
             loss = trial.suggest_categorical("loss", ["linear", "square", "exponential"])
             model = AdaBoostRegressor(n_estimators=n_estimators, learning_rate=learning_rate, loss=loss, random_state=self.random_state)
+
+        elif self.algorithm == "GradientBoostingRegressor":
+            n_estimators = trial.suggest_int("n_estimators", 50, 500)
+            max_depth = trial.suggest_int("max_depth", 2, 10)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
+            subsample = trial.suggest_float("subsample", 0.5, 1.0)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
+            max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
+            model = GradientBoostingRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                min_samples_leaf=min_samples_leaf,
+                max_features=max_features,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "HistGradientBoostingRegressor":
+            max_iter = trial.suggest_int("max_iter", 50, 500)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 15)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
+            min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 50)
+            l2_regularization = trial.suggest_float("l2_regularization", 0.0, 10.0)
+            model = HistGradientBoostingRegressor(
+                max_iter=max_iter,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                min_samples_leaf=min_samples_leaf,
+                l2_regularization=l2_regularization,
+                random_state=self.random_state,
+            )
 
         elif self.algorithm == "MLPRegressor":
             hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 50), (100, 100)])
@@ -706,6 +906,41 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
                 criterion=criterion,
                 max_features=max_features,
                 random_state=self.random_state,
+            )
+
+        elif self.algorithm == "Ridge":
+            alpha = trial.suggest_float("alpha", 1e-4, 1e4, log=True)
+            model = Ridge(alpha=alpha)
+
+        elif self.algorithm == "Lasso":
+            alpha = trial.suggest_float("alpha", 1e-4, 1e2, log=True)
+            model = Lasso(alpha=alpha, max_iter=5000)
+
+        elif self.algorithm == "ElasticNet":
+            alpha = trial.suggest_float("alpha", 1e-4, 1e2, log=True)
+            l1_ratio = trial.suggest_float("l1_ratio", 0.0, 1.0)
+            model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000)
+
+        elif self.algorithm == "LGBMRegressor" and LIGHTGBM_AVAILABLE:
+            n_estimators = trial.suggest_int("n_estimators", 50, 500)
+            max_depth = trial.suggest_int("max_depth", 2, 20)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
+            num_leaves = trial.suggest_int("num_leaves", 15, 127)
+            subsample = trial.suggest_float("subsample", 0.5, 1.0)
+            colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
+            reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True)
+            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True)
+            model = LGBMRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                num_leaves=num_leaves,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                reg_alpha=reg_alpha,
+                reg_lambda=reg_lambda,
+                random_state=self.random_state,
+                verbosity=-1,
             )
 
         elif self.algorithm == "CatBoostRegressor" and CATBOOST_AVAILABLE:
@@ -831,7 +1066,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
 
         # Create and fit the best estimator
         self._create_best_estimator()
-        self.best_estimator_.fit(X, y)
+        self._fit_best_estimator(X, y)
 
         # Set output dimensions
         self.n_outputs_ = 1 if y.ndim == 1 else y.shape[1]
@@ -851,12 +1086,30 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             if max_depth_none:
                 params.pop("max_depth", None)
             self.best_estimator_ = RandomForestRegressor(**params, random_state=self.random_state)
+        elif self.algorithm == "ExtraTreesRegressor":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
+            self.best_estimator_ = ExtraTreesRegressor(**params, random_state=self.random_state)
         elif self.algorithm == "AdaBoostRegressor":
             self.best_estimator_ = AdaBoostRegressor(**params, random_state=self.random_state)
+        elif self.algorithm == "GradientBoostingRegressor":
+            self.best_estimator_ = GradientBoostingRegressor(**params, random_state=self.random_state)
+        elif self.algorithm == "HistGradientBoostingRegressor":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
+            self.best_estimator_ = HistGradientBoostingRegressor(**params, random_state=self.random_state)
         elif self.algorithm == "MLPRegressor":
             self.best_estimator_ = MLPRegressor(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
         elif self.algorithm == "LinearRegression":
             self.best_estimator_ = LinearRegression(**params)
+        elif self.algorithm == "Ridge":
+            self.best_estimator_ = Ridge(**params)
+        elif self.algorithm == "Lasso":
+            self.best_estimator_ = Lasso(**params, max_iter=5000)
+        elif self.algorithm == "ElasticNet":
+            self.best_estimator_ = ElasticNet(**params, max_iter=5000)
         elif self.algorithm == "DecisionTreeRegressor":
             max_depth_none = params.pop("max_depth_none", False)
             if max_depth_none:
@@ -866,6 +1119,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             self.best_estimator_ = CatBoostRegressor(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
         elif self.algorithm == "XGBRegressor" and XGBOOST_AVAILABLE:
             self.best_estimator_ = XGBRegressor(**params, random_state=self.random_state, verbosity=0)
+        elif self.algorithm == "LGBMRegressor" and LIGHTGBM_AVAILABLE:
+            self.best_estimator_ = LGBMRegressor(**params, random_state=self.random_state, verbosity=-1)
         else:
             raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 
@@ -873,12 +1128,22 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         """Make predictions using the best estimator"""
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
         X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
+                return self.best_estimator_.predict(X)
         return self.best_estimator_.predict(X)
 
     def score(self, X, y):
         """Return the coefficient of determination R^2 of the prediction"""
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
         X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True, y_numeric=True)
+        if LIGHTGBM_AVAILABLE and self.algorithm == "LGBMRegressor":
+            import warnings as _warnings
+            with _warnings.catch_warnings():
+                _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
+                return self.best_estimator_.score(X, y)
         return self.best_estimator_.score(X, y)
 
 

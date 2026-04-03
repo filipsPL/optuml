@@ -240,3 +240,113 @@ def test_optimizer_invalid_cv(classification_data):
             cv=-1,  # Invalid cv value
             random_state=42
         )
+
+
+# ---------------------------------------------------------------------------
+# New algorithm tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("algorithm", [
+    "ExtraTreesClassifier",
+    "GradientBoostingClassifier",
+    "HistGradientBoostingClassifier",
+    "RidgeClassifier",
+])
+def test_new_classifiers(algorithm, classification_data):
+    """Test that newly added classifiers fit, predict, and score correctly."""
+    X_train, X_test, y_train, y_test = classification_data
+    optimizer = Optimizer(algorithm=algorithm, n_trials=5, random_state=42)
+    optimizer.fit(X_train, y_train)
+    predictions = optimizer.predict(X_test)
+    score = optimizer.score(X_test, y_test)
+
+    assert isinstance(predictions, np.ndarray)
+    assert len(predictions) == len(y_test)
+    assert 0 <= score <= 1
+    assert optimizer.best_params_ is not None
+    assert optimizer.best_estimator_ is not None
+
+
+@pytest.mark.parametrize("algorithm", [
+    "ExtraTreesRegressor",
+    "GradientBoostingRegressor",
+    "HistGradientBoostingRegressor",
+    "Ridge",
+    "Lasso",
+    "ElasticNet",
+])
+def test_new_regressors(algorithm, regression_data):
+    """Test that newly added regressors fit, predict, and score correctly."""
+    X_train, X_test, y_train, y_test = regression_data
+    optimizer = Optimizer(algorithm=algorithm, n_trials=5, random_state=42)
+    optimizer.fit(X_train, y_train)
+    predictions = optimizer.predict(X_test)
+    score = optimizer.score(X_test, y_test)
+
+    assert isinstance(predictions, np.ndarray)
+    assert len(predictions) == len(y_test)
+    assert optimizer.best_params_ is not None
+    assert optimizer.best_estimator_ is not None
+
+
+def test_lgbm_classifier(classification_data):
+    """Test LGBMClassifier (skipped if lightgbm not installed)."""
+    pytest.importorskip("lightgbm")
+    X_train, X_test, y_train, y_test = classification_data
+    optimizer = Optimizer(algorithm="LGBMClassifier", n_trials=5, random_state=42)
+    optimizer.fit(X_train, y_train)
+    predictions = optimizer.predict(X_test)
+    assert isinstance(predictions, np.ndarray)
+    assert 0 <= optimizer.score(X_test, y_test) <= 1
+
+
+def test_lgbm_regressor(regression_data):
+    """Test LGBMRegressor (skipped if lightgbm not installed)."""
+    pytest.importorskip("lightgbm")
+    X_train, X_test, y_train, y_test = regression_data
+    optimizer = Optimizer(algorithm="LGBMRegressor", n_trials=5, random_state=42)
+    optimizer.fit(X_train, y_train)
+    predictions = optimizer.predict(X_test)
+    assert isinstance(predictions, np.ndarray)
+
+
+def test_extra_trees_predict_proba(classification_data):
+    """ExtraTreesClassifier supports predict_proba."""
+    X_train, X_test, y_train, y_test = classification_data
+    optimizer = Optimizer(algorithm="ExtraTreesClassifier", n_trials=5, random_state=42)
+    optimizer.fit(X_train, y_train)
+    proba = optimizer.predict_proba(X_test)
+    assert proba.shape == (len(X_test), len(np.unique(y_train)))
+    assert np.allclose(proba.sum(axis=1), 1)
+
+
+def test_ridge_classifier_no_predict_proba(classification_data):
+    """RidgeClassifier does not support predict_proba."""
+    X_train, X_test, y_train, y_test = classification_data
+    optimizer = Optimizer(algorithm="RidgeClassifier", n_trials=5, random_state=42)
+    optimizer.fit(X_train, y_train)
+    with pytest.raises(AttributeError):
+        optimizer.predict_proba(X_test)
+
+
+def test_linear_regression_single_trial(regression_data):
+    """LinearRegression should run exactly 1 Optuna trial (no hyperparameters)."""
+    X_train, X_test, y_train, y_test = regression_data
+    optimizer = Optimizer(
+        algorithm="LinearRegression", n_trials=50, random_state=42
+    )
+    optimizer.fit(X_train, y_train)
+    assert optimizer.n_trials_completed_ == 1
+    assert optimizer.best_params_ == {}
+
+
+def test_hist_gradient_boosting_max_depth_none(regression_data):
+    """HistGradientBoostingRegressor: max_depth=None must not appear in best_estimator_ params."""
+    X_train, X_test, y_train, y_test = regression_data
+    optimizer = Optimizer(
+        algorithm="HistGradientBoostingRegressor", n_trials=5, random_state=42
+    )
+    optimizer.fit(X_train, y_train)
+    estimator_params = optimizer.best_estimator_.get_params()
+    # If max_depth_none was True, max_depth should be None in the final estimator
+    assert "max_depth_none" not in estimator_params

@@ -39,9 +39,10 @@ pip install optuml
 With optional algorithm support:
 
 ```bash
-pip install optuml[all]       # CatBoost + XGBoost
-pip install optuml[catboost]  # CatBoost only
-pip install optuml[xgboost]  # XGBoost only
+pip install optuml[all]          # CatBoost + XGBoost + LightGBM
+pip install optuml[catboost]     # CatBoost only
+pip install optuml[xgboost]      # XGBoost only
+pip install optuml[lightgbm]     # LightGBM only
 ```
 
 or upgrade:
@@ -133,33 +134,45 @@ print(f"R² Score: {r2:.3f}")
 
 ### Classification Algorithms
 
-| Algorithm                | Description                     | Key Features                              |
-| ------------------------ | ------------------------------- | ----------------------------------------- |
-| `SVC`                    | Support Vector Classifier       | Non-linear kernels, probability estimates |
-| `LogisticRegression`     | Logistic Regression             | L1/L2/Elastic-Net regularization          |
-| `KNeighborsClassifier`   | k-Nearest Neighbors             | Distance weighting, various metrics       |
-| `RandomForestClassifier` | Random Forest                   | Feature importance, OOB score             |
-| `AdaBoostClassifier`     | AdaBoost                        | Boosted ensemble, learning rate tuning    |
-| `MLPClassifier`          | Neural Network                  | Multiple architectures, early stopping    |
-| `GaussianNB`             | Gaussian Naive Bayes            | Fast, probabilistic                       |
-| `QDA`                    | Quadratic Discriminant Analysis | Non-linear boundaries                     |
-| `DecisionTreeClassifier` | Decision Tree                   | Multiple criteria, pruning                |
-| `CatBoostClassifier`*    | CatBoost                        | Categorical features, GPU support         |
-| `XGBClassifier`*         | XGBoost                         | Regularization, missing values            |
+| Algorithm                          | Description                        | Key Features                              |
+| ---------------------------------- | ---------------------------------- | ----------------------------------------- |
+| `SVC`                              | Support Vector Classifier          | Non-linear kernels, probability estimates |
+| `LogisticRegression`               | Logistic Regression                | L1/L2/Elastic-Net regularization          |
+| `RidgeClassifier`                  | Ridge Classifier                   | L2 regularization, fast linear model      |
+| `KNeighborsClassifier`             | k-Nearest Neighbors                | Distance weighting, various metrics       |
+| `RandomForestClassifier`           | Random Forest                      | Feature importance, OOB score             |
+| `ExtraTreesClassifier`             | Extremely Randomized Trees         | Faster than RF, reduced variance          |
+| `AdaBoostClassifier`               | AdaBoost                           | Boosted ensemble, learning rate tuning    |
+| `GradientBoostingClassifier`       | Gradient Boosting                  | Sequential boosting, feature subsampling  |
+| `HistGradientBoostingClassifier`   | Histogram Gradient Boosting        | Fast GBDT, native NaN support             |
+| `MLPClassifier`                    | Neural Network                     | Multiple architectures, early stopping    |
+| `GaussianNB`                       | Gaussian Naive Bayes               | Fast, probabilistic                       |
+| `QDA`                              | Quadratic Discriminant Analysis    | Non-linear boundaries                     |
+| `DecisionTreeClassifier`           | Decision Tree                      | Multiple criteria, pruning                |
+| `CatBoostClassifier`*              | CatBoost                           | Categorical features, GPU support         |
+| `XGBClassifier`*                   | XGBoost                            | Regularization, missing values            |
+| `LGBMClassifier`*                  | LightGBM                           | Fast GBDT, leaf-wise growth               |
 
 ### Regression Algorithms
 
-| Algorithm               | Description               | Key Features             |
-| ----------------------- | ------------------------- | ------------------------ |
-| `SVR`                   | Support Vector Regression | Epsilon-insensitive loss |
-| `LinearRegression`      | Linear Regression         | Simple, interpretable    |
-| `KNeighborsRegressor`   | k-Nearest Neighbors       | Local regression         |
-| `RandomForestRegressor` | Random Forest             | Reduces overfitting      |
-| `AdaBoostRegressor`     | AdaBoost                  | Sequential learning      |
-| `MLPRegressor`          | Neural Network            | Non-linear patterns      |
-| `DecisionTreeRegressor` | Decision Tree             | Non-parametric           |
-| `CatBoostRegressor`*    | CatBoost                  | Handles categoricals     |
-| `XGBRegressor`*         | XGBoost                   | High performance         |
+| Algorithm                         | Description                        | Key Features                             |
+| --------------------------------- | ---------------------------------- | ---------------------------------------- |
+| `SVR`                             | Support Vector Regression          | Epsilon-insensitive loss                 |
+| `LinearRegression`                | Linear Regression                  | Simple, interpretable                    |
+| `Ridge`                           | Ridge Regression                   | L2 regularization, stable on collinear   |
+| `Lasso`                           | Lasso Regression                   | L1 regularization, feature selection     |
+| `ElasticNet`                      | Elastic Net                        | L1+L2 regularization, sparse solutions  |
+| `KNeighborsRegressor`             | k-Nearest Neighbors                | Local regression                         |
+| `RandomForestRegressor`           | Random Forest                      | Reduces overfitting                      |
+| `ExtraTreesRegressor`             | Extremely Randomized Trees         | Faster than RF, reduced variance         |
+| `AdaBoostRegressor`               | AdaBoost                           | Sequential learning                      |
+| `GradientBoostingRegressor`       | Gradient Boosting                  | Sequential boosting, feature subsampling |
+| `HistGradientBoostingRegressor`   | Histogram Gradient Boosting        | Fast GBDT, native NaN support            |
+| `MLPRegressor`                    | Neural Network                     | Non-linear patterns                      |
+| `DecisionTreeRegressor`           | Decision Tree                      | Non-parametric                           |
+| `CatBoostRegressor`*              | CatBoost                           | Handles categoricals                     |
+| `XGBRegressor`*                   | XGBoost                            | High performance                         |
+| `LGBMRegressor`*                  | LightGBM                           | Fast GBDT, leaf-wise growth              |
 
 *Optional dependencies (install separately)
 
@@ -348,12 +361,12 @@ Specialized optimizer for regression algorithms with appropriate default scoring
 optimizer = Optimizer(algorithm="SVC", cv_timeout=300, cv=3)
 ```
 
-### Issue: CatBoost/XGBoost not available
+### Issue: CatBoost/XGBoost/LightGBM not available
 **Solution**: Install optional dependencies:
 ```bash
 pip install optuml[all]
 # or individually:
-pip install catboost xgboost
+pip install catboost xgboost lightgbm
 ```
 
 ### Issue: Optimization takes too long

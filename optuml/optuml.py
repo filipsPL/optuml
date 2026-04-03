@@ -314,7 +314,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
         elif self.algorithm == "RandomForestClassifier":
             n_estimators = trial.suggest_int("n_estimators", 10, 200)
-            max_depth = trial.suggest_int("max_depth", 2, 32)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 32)
             min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
             max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
@@ -382,7 +383,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             )
 
         elif self.algorithm == "DecisionTreeClassifier":
-            max_depth = trial.suggest_int("max_depth", 2, 32)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 32)
             min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
             criterion = trial.suggest_categorical("criterion", ["gini", "entropy"])
@@ -416,12 +418,12 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
             max_depth = trial.suggest_int("max_depth", 2, 20)
-            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.3, log=True)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
             colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
             gamma = trial.suggest_float("gamma", 0, 5)
             reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True)
-            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True)
+            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True)
             model = XGBClassifier(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
@@ -528,6 +530,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         elif self.algorithm == "KNeighborsClassifier":
             self.best_estimator_ = KNeighborsClassifier(**params)
         elif self.algorithm == "RandomForestClassifier":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
             self.best_estimator_ = RandomForestClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "AdaBoostClassifier":
             self.best_estimator_ = AdaBoostClassifier(**params, random_state=self.random_state)
@@ -540,6 +545,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         elif self.algorithm == "LogisticRegression":
             self.best_estimator_ = _make_logistic_regression(**params, random_state=self.random_state, max_iter=1000)
         elif self.algorithm == "DecisionTreeClassifier":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
             self.best_estimator_ = DecisionTreeClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "CatBoostClassifier" and CATBOOST_AVAILABLE:
             self.best_estimator_ = CatBoostClassifier(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
@@ -635,7 +643,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
 
         elif self.algorithm == "RandomForestRegressor":
             n_estimators = trial.suggest_int("n_estimators", 10, 200)
-            max_depth = trial.suggest_int("max_depth", 2, 32)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 32)
             min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
             max_features = trial.suggest_categorical("max_features", ["sqrt", "log2", None])
@@ -673,11 +682,13 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             model = MLPRegressor(**mlp_params)
 
         elif self.algorithm == "LinearRegression":
-            fit_intercept = trial.suggest_categorical("fit_intercept", [True, False])
-            model = LinearRegression(fit_intercept=fit_intercept)
+            # LinearRegression has no regularization hyperparameters worth tuning;
+            # always use defaults to avoid noise from a near-trivial search space.
+            model = LinearRegression()
 
         elif self.algorithm == "DecisionTreeRegressor":
-            max_depth = trial.suggest_int("max_depth", 2, 32)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 32)
             min_samples_split = trial.suggest_int("min_samples_split", 2, 20)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 20)
             criterion = trial.suggest_categorical("criterion", ["squared_error", "friedman_mse", "absolute_error"])
@@ -711,12 +722,12 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         elif self.algorithm == "XGBRegressor" and XGBOOST_AVAILABLE:
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
             max_depth = trial.suggest_int("max_depth", 2, 20)
-            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.3, log=True)
+            learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
             colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
             gamma = trial.suggest_float("gamma", 0, 5)
             reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True)
-            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True)
+            reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True)
             model = XGBRegressor(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
@@ -820,6 +831,9 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         elif self.algorithm == "KNeighborsRegressor":
             self.best_estimator_ = KNeighborsRegressor(**params)
         elif self.algorithm == "RandomForestRegressor":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
             self.best_estimator_ = RandomForestRegressor(**params, random_state=self.random_state)
         elif self.algorithm == "AdaBoostRegressor":
             self.best_estimator_ = AdaBoostRegressor(**params, random_state=self.random_state)
@@ -828,6 +842,9 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         elif self.algorithm == "LinearRegression":
             self.best_estimator_ = LinearRegression(**params)
         elif self.algorithm == "DecisionTreeRegressor":
+            max_depth_none = params.pop("max_depth_none", False)
+            if max_depth_none:
+                params.pop("max_depth", None)
             self.best_estimator_ = DecisionTreeRegressor(**params, random_state=self.random_state)
         elif self.algorithm == "CatBoostRegressor" and CATBOOST_AVAILABLE:
             self.best_estimator_ = CatBoostRegressor(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)

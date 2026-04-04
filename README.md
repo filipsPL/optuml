@@ -160,6 +160,7 @@ print(f"R² Score: {r2:.3f}")
 | `GaussianNB`                     | Gaussian Naive Bayes            | Fast, probabilistic                       |
 | `QDA`                            | Quadratic Discriminant Analysis | Non-linear boundaries                     |
 | `DecisionTreeClassifier`         | Decision Tree                   | Multiple criteria, pruning                |
+| `SGDClassifier`                  | Stochastic Gradient Descent     | Multiple losses, L1/L2/ElasticNet, online |
 | `CatBoostClassifier`*            | CatBoost                        | Categorical features, GPU support         |
 | `XGBClassifier`*                 | XGBoost                         | Regularization, missing values            |
 | `LGBMClassifier`*                | LightGBM                        | Fast GBDT, leaf-wise growth               |
@@ -181,6 +182,7 @@ print(f"R² Score: {r2:.3f}")
 | `HistGradientBoostingRegressor` | Histogram Gradient Boosting | Fast GBDT, native NaN support            |
 | `MLPRegressor`                  | Neural Network              | Non-linear patterns                      |
 | `DecisionTreeRegressor`         | Decision Tree               | Non-parametric                           |
+| `SGDRegressor`                  | Stochastic Gradient Descent | Multiple losses, L1/L2/ElasticNet, online |
 | `CatBoostRegressor`*            | CatBoost                    | Handles categoricals                     |
 | `XGBRegressor`*                 | XGBoost                     | High performance                         |
 | `LGBMRegressor`*                | LightGBM                    | Fast GBDT, leaf-wise growth              |
@@ -389,9 +391,8 @@ pip install catboost xgboost lightgbm
 
 ### Issue: Memory errors with large datasets
 **Solutions**:
-1. Use algorithms with lower memory footprint (e.g., `LogisticRegression` instead of `SVC`)
+1. Use algorithms with lower memory footprint (e.g., `LogisticRegression`, `SGDClassifier`, or `SGDRegressor`)
 2. Reduce CV folds
-3. Use `SGDClassifier` or `SGDRegressor` (if added to supported algorithms)
 
 ## Best Practices
 

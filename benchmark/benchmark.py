@@ -33,7 +33,7 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
 )
-from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, RidgeClassifier, Lasso, ElasticNet
+from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, RidgeClassifier, Lasso, ElasticNet, SGDClassifier, SGDRegressor
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier, MLPRegressor
@@ -99,6 +99,7 @@ CLASSIFIERS = {
     "GaussianNB": GaussianNB,
     "QDA": QDA,
     "MLPClassifier": lambda **kw: MLPClassifier(max_iter=1000, **kw),
+    "SGDClassifier": lambda **kw: SGDClassifier(max_iter=1000, **kw),
 }
 
 if CATBOOST_AVAILABLE:
@@ -124,6 +125,7 @@ REGRESSORS = {
     "ElasticNet": ElasticNet,
     "DecisionTreeRegressor": DecisionTreeRegressor,
     "MLPRegressor": lambda **kw: MLPRegressor(max_iter=1000, **kw),
+    "SGDRegressor": lambda **kw: SGDRegressor(max_iter=1000, **kw),
 }
 
 if CATBOOST_AVAILABLE:

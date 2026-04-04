@@ -19,7 +19,7 @@ from sklearn.utils.multiclass import unique_labels
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, AdaBoostClassifier, AdaBoostRegressor
-from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, RidgeClassifier, Lasso, ElasticNet
+from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, RidgeClassifier, Lasso, ElasticNet, SGDClassifier, SGDRegressor
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier, MLPRegressor
@@ -301,6 +301,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         "LogisticRegression",
         "RidgeClassifier",
         "DecisionTreeClassifier",
+        "SGDClassifier",
     )
 
     @classmethod
@@ -544,6 +545,31 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 verbosity=0,
             )
 
+        elif self.algorithm == "SGDClassifier":
+            # loss: default="hinge" (linear SVM). "log_loss" = logistic regression.
+            loss = trial.suggest_categorical("loss", ["hinge", "log_loss", "modified_huber", "squared_hinge", "perceptron"])
+            # penalty: default="l2"
+            penalty = trial.suggest_categorical("penalty", ["l2", "l1", "elasticnet"])
+            # alpha: regularization strength, default=1e-4
+            alpha = trial.suggest_float("alpha", 1e-6, 1e-1, log=True)
+            # l1_ratio: only used when penalty="elasticnet", default=0.15
+            l1_ratio = trial.suggest_float("l1_ratio", 0.0, 1.0) if penalty == "elasticnet" else 0.15
+            # learning_rate schedule: default="optimal"
+            learning_rate_schedule = trial.suggest_categorical("learning_rate", ["optimal", "constant", "invscaling", "adaptive"])
+            sgd_params = dict(
+                loss=loss,
+                penalty=penalty,
+                alpha=alpha,
+                l1_ratio=l1_ratio,
+                learning_rate=learning_rate_schedule,
+                max_iter=1000,
+                random_state=self.random_state,
+            )
+            # eta0 only relevant for schedules other than "optimal"
+            if learning_rate_schedule != "optimal":
+                sgd_params["eta0"] = trial.suggest_float("eta0", 1e-4, 1.0, log=True)
+            model = SGDClassifier(**sgd_params, tol=1e-3)
+
         else:
             raise ValueError(f"Algorithm {self.algorithm} is not implemented")
 
@@ -682,6 +708,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             self.best_estimator_ = XGBClassifier(**params, random_state=self.random_state, eval_metric="logloss", verbosity=0)
         elif self.algorithm == "LGBMClassifier" and LIGHTGBM_AVAILABLE:
             self.best_estimator_ = LGBMClassifier(**params, random_state=self.random_state, verbosity=-1)
+        elif self.algorithm == "SGDClassifier":
+            self.best_estimator_ = SGDClassifier(**params, max_iter=1000, tol=1e-3, random_state=self.random_state)
         else:
             raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 
@@ -752,6 +780,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         "Lasso",
         "ElasticNet",
         "DecisionTreeRegressor",
+        "SGDRegressor",
     )
 
     # Algorithms with no tunable hyperparameters: run only 1 Optuna trial.
@@ -982,6 +1011,34 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
                 verbosity=0,
             )
 
+        elif self.algorithm == "SGDRegressor":
+            # loss: default="squared_error"
+            loss = trial.suggest_categorical("loss", ["squared_error", "huber", "epsilon_insensitive", "squared_epsilon_insensitive"])
+            # penalty: default="l2"
+            penalty = trial.suggest_categorical("penalty", ["l2", "l1", "elasticnet"])
+            # alpha: regularization strength, default=1e-4
+            alpha = trial.suggest_float("alpha", 1e-6, 1e-1, log=True)
+            # l1_ratio: only used when penalty="elasticnet", default=0.15
+            l1_ratio = trial.suggest_float("l1_ratio", 0.0, 1.0) if penalty == "elasticnet" else 0.15
+            # epsilon: only relevant for huber / epsilon_insensitive losses, default=0.1
+            epsilon = trial.suggest_float("epsilon", 1e-4, 1.0, log=True) if loss in ("huber", "epsilon_insensitive", "squared_epsilon_insensitive") else 0.1
+            # learning_rate schedule: default="invscaling"
+            learning_rate_schedule = trial.suggest_categorical("learning_rate", ["invscaling", "optimal", "constant", "adaptive"])
+            sgd_params = dict(
+                loss=loss,
+                penalty=penalty,
+                alpha=alpha,
+                l1_ratio=l1_ratio,
+                epsilon=epsilon,
+                learning_rate=learning_rate_schedule,
+                max_iter=1000,
+                random_state=self.random_state,
+            )
+            # eta0 only relevant for schedules other than "optimal"
+            if learning_rate_schedule != "optimal":
+                sgd_params["eta0"] = trial.suggest_float("eta0", 1e-4, 1.0, log=True)
+            model = SGDRegressor(**sgd_params, tol=1e-3)
+
         else:
             raise ValueError(f"Algorithm {self.algorithm} is not implemented")
 
@@ -1121,6 +1178,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             self.best_estimator_ = XGBRegressor(**params, random_state=self.random_state, verbosity=0)
         elif self.algorithm == "LGBMRegressor" and LIGHTGBM_AVAILABLE:
             self.best_estimator_ = LGBMRegressor(**params, random_state=self.random_state, verbosity=-1)
+        elif self.algorithm == "SGDRegressor":
+            self.best_estimator_ = SGDRegressor(**params, max_iter=1000, tol=1e-3, random_state=self.random_state)
         else:
             raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 

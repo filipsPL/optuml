@@ -418,7 +418,7 @@ pip install catboost xgboost lightgbm
 
 ## Benchmark
 
-See [this page](benchmark/benchmark.md) for benchmark results.
+See [this page](benchmark/README.md) for benchmark results.
 
 ## Citation
 

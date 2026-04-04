@@ -1,10 +1,8 @@
 """
 OptuML Benchmark: Compare default vs optimized hyperparameters.
 
-Compares algorithm performance across 4 classical datasets using:
-  - Default scikit-learn hyperparameters
-  - OptuML quick optimization (20 trials)
-  - OptuML full optimization (50 trials)
+Runs benchmarks and saves results to CSV. To generate plots and markdown:
+    python benchmark/benchmark-plot.py
 
 Usage:
     python benchmark/benchmark.py
@@ -186,33 +184,8 @@ def _accepts_random_state(factory):
         return False
 
 
-def fmt(val):
-    """Format a float for table display."""
-    if np.isnan(val):
-        return "  ---"
-    return f"{val:+.4f}" if val < 0 else f"{val:.4f}"
-
-
-def print_table(rows, col_widths, headers):
-    """Print a formatted table."""
-    header_line = ""
-    for h, w in zip(headers, col_widths):
-        header_line += h.ljust(w)
-    print(header_line)
-    print("-" * len(header_line))
-    for row in rows:
-        line = ""
-        for cell, w in zip(row, col_widths):
-            line += str(cell).ljust(w)
-        print(line)
-
-
 def run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring):
-    """Run default + quick + full for a single algorithm, with progress output.
-
-    Returns a dict with raw float values for CSV/plotting plus a pre-formatted
-    list of strings for console table output.
-    """
+    """Run default + quick + full for a single algorithm, with progress output."""
     sys.stdout.write(f"  {algo_name}... ")
     sys.stdout.flush()
 
@@ -240,7 +213,7 @@ def run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring):
     total_time = def_time + quick_time + full_time
     print(f"done ({total_time:.1f}s)")
 
-    record = {
+    return {
         "algorithm": algo_name,
         "def_cv": def_cv,
         "def_test": def_test,
@@ -250,17 +223,6 @@ def run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring):
         "full_test": full_test,
         "time_s": total_time,
     }
-    table_row = [
-        algo_name,
-        fmt(def_cv),
-        fmt(def_test),
-        fmt(quick_cv),
-        fmt(quick_test),
-        fmt(full_cv),
-        fmt(full_test),
-        f"{total_time:.1f}",
-    ]
-    return record, table_row
 
 
 # ---------------------------------------------------------------------------
@@ -299,18 +261,11 @@ def run_classification_benchmark(all_records):
         print(f"\n--- {ds_name} (n={len(X)}, features={X.shape[1]}, classes={len(np.unique(y))}) ---")
         print(f"    Scoring: {scoring}, CV folds: {CV_FOLDS}, timeout: {PER_ALGO_TIMEOUT}s per run\n")
 
-        table_rows = []
         for algo_name, factory in CLASSIFIERS.items():
-            record, table_row = run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring)
+            record = run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring)
             record["dataset"] = ds_name
             record["task"] = "classification"
             all_records.append(record)
-            table_rows.append(table_row)
-
-        print()
-        headers = ["Algorithm", "Default CV", "Default Test", "Quick CV", "Quick Test", "Full CV", "Full Test", "Time(s)"]
-        col_widths = [26, 13, 14, 13, 13, 13, 13, 10]
-        print_table(table_rows, col_widths, headers)
 
 
 def run_regression_benchmark(all_records):
@@ -327,39 +282,19 @@ def run_regression_benchmark(all_records):
         print(f"\n--- {ds_name} (n={len(X)}, features={X.shape[1]}) ---")
         print(f"    Scoring: {scoring}, CV folds: {CV_FOLDS}, timeout: {PER_ALGO_TIMEOUT}s per run\n")
 
-        table_rows = []
         for algo_name, factory in REGRESSORS.items():
-            record, table_row = run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring)
+            record = run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring)
             record["dataset"] = ds_name
             record["task"] = "regression"
             all_records.append(record)
-            table_rows.append(table_row)
-
-        print()
-        headers = ["Algorithm", "Default CV", "Default Test", "Quick CV", "Quick Test", "Full CV", "Full Test", "Time(s)"]
-        col_widths = [26, 13, 14, 13, 13, 13, 13, 10]
-        print_table(table_rows, col_widths, headers)
-
-
-def print_summary_legend():
-    """Print explanation of columns."""
-    print("\n" + "-" * 115)
-    print("Legend:")
-    print("  Default CV/Test   = scikit-learn with default hyperparameters")
-    print(f"  Quick CV/Test     = OptuML with {QUICK_TRIALS} trials (timeout {PER_ALGO_TIMEOUT}s)")
-    print(f"  Full CV/Test      = OptuML with {FULL_TRIALS} trials (timeout {PER_ALGO_TIMEOUT}s)")
-    print("  CV                = mean cross-validation score on training set")
-    print("  Test              = score on held-out test set")
-    print("  Time(s)           = total wall time (default + quick + full)")
 
 
 if __name__ == "__main__":
     all_records = []
     run_classification_benchmark(all_records)
     run_regression_benchmark(all_records)
-    print_summary_legend()
 
     csv_path = os.path.join(OUTPUT_DIR, "benchmark_results.csv")
     save_csv(all_records, csv_path)
-    print("\nTo generate plots run:")
+    print("\nTo generate plots and markdown run:")
     print(f"  python benchmark/benchmark-plot.py {csv_path}")

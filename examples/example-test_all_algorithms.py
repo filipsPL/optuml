@@ -12,26 +12,38 @@ warnings.filterwarnings('ignore')
 # from optimizer_module import Optimizer  # Uncomment this line if Optimizer is in a separate module
 
 # List of classifiers and regressors
-classifiers = [
-    "SVC", "KNeighborsClassifier", "RandomForestClassifier",
-    "AdaBoostClassifier", "MLPClassifier", "GaussianNB",
-    "QDA", "CatBoostClassifier", "XGBClassifier"
-]
+_supported = set(Optimizer._get_supported_algorithms())
 
-regressors = [
+print("Supported Algorithms:", _supported)
+
+classifiers = [a for a in [
+    "SVC", "KNeighborsClassifier", "RandomForestClassifier",
+    "ExtraTreesClassifier", "AdaBoostClassifier", "GradientBoostingClassifier",
+    "HistGradientBoostingClassifier", "MLPClassifier", "GaussianNB",
+    "QDA", "LogisticRegression", "RidgeClassifier", "DecisionTreeClassifier",
+    "SGDClassifier", "CatBoostClassifier", "XGBClassifier", "LGBMClassifier",
+] if a in _supported]
+
+regressors = [a for a in [
     "SVR", "KNeighborsRegressor", "RandomForestRegressor",
-    "AdaBoostRegressor", "MLPRegressor", "CatBoostRegressor",
-    "XGBRegressor"
-]
+    "ExtraTreesRegressor", "AdaBoostRegressor", "GradientBoostingRegressor",
+    "HistGradientBoostingRegressor", "MLPRegressor", "LinearRegression",
+    "Ridge", "Lasso", "ElasticNet", "DecisionTreeRegressor",
+    "SGDRegressor", "CatBoostRegressor", "XGBRegressor", "LGBMRegressor",
+] if a in _supported]
 
 # Load datasets
 iris = load_iris()
-X_classification = iris.data
-y_classification = iris.target
+
+print("Iris Dataset Loaded. Number of samples:", len(iris.data))
+
+X_classification = iris.data[:100]  # Using only the first 100 samples for binary classification
+y_classification = iris.target[:100]  # Using only the first 100 targets for binary classification
 
 diabetes = load_diabetes()
-X_regression = diabetes.data
-y_regression = diabetes.target
+print("Diabetes Dataset Loaded. Number of samples:", len(diabetes.data))
+X_regression = diabetes.data[:100]  # Using only the first 100 samples for regression
+y_regression = diabetes.target[:100]  # Using only the first 100 targets for regression
 
 # Split datasets into training and testing sets
 Xc_train, Xc_test, yc_train, yc_test = train_test_split(

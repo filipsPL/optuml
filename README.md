@@ -9,14 +9,25 @@
 
 [![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17305964.svg)](https://doi.org/10.5281/zenodo.17305963)
 
-```
-Input                  optuml train                           Predict                        
-┌─────────────────┐    ┌──────────────────────────────────┐   ┌─────────────────────────────┐
-│X_train, y_train ┼────► clf = Optimizer(algorithm="SVC") ├───► y_pred = clf.predict(X_test)│
-└─────────────────┘    │ clf.fit(X_train, y_train)        │   │                             │
-┌─────────────────┐    └─▲────────────────────────────────┘   └─────────────────────────▲───┘
-│ML algorithm     ├──────┘                                                              │    
-└─────────────────┘                                                            X_test───┘    
+## tl;dr
+
+```python
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from optuml import Optimizer
+
+# Load data
+X, y = load_iris(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3)
+
+# Create and train optimizer
+clf = Optimizer(algorithm="RandomForestClassifier", n_trials=50, cv=5, scoring="accuracy")
+clf.fit(X_train, y_train)
+
+# Make predictions
+y_pred = clf.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
 ```
 
 ## Key Features
@@ -134,49 +145,49 @@ print(f"R² Score: {r2:.3f}")
 
 ### Classification Algorithms
 
-| Algorithm                          | Description                        | Key Features                              |
-| ---------------------------------- | ---------------------------------- | ----------------------------------------- |
-| `SVC`                              | Support Vector Classifier          | Non-linear kernels, probability estimates |
-| `LogisticRegression`               | Logistic Regression                | L1/L2/Elastic-Net regularization          |
-| `RidgeClassifier`                  | Ridge Classifier                   | L2 regularization, fast linear model      |
-| `KNeighborsClassifier`             | k-Nearest Neighbors                | Distance weighting, various metrics       |
-| `RandomForestClassifier`           | Random Forest                      | Feature importance, OOB score             |
-| `ExtraTreesClassifier`             | Extremely Randomized Trees         | Faster than RF, reduced variance          |
-| `AdaBoostClassifier`               | AdaBoost                           | Boosted ensemble, learning rate tuning    |
-| `GradientBoostingClassifier`       | Gradient Boosting                  | Sequential boosting, feature subsampling  |
-| `HistGradientBoostingClassifier`   | Histogram Gradient Boosting        | Fast GBDT, native NaN support             |
-| `MLPClassifier`                    | Neural Network                     | Multiple architectures, early stopping    |
-| `GaussianNB`                       | Gaussian Naive Bayes               | Fast, probabilistic                       |
-| `QDA`                              | Quadratic Discriminant Analysis    | Non-linear boundaries                     |
-| `DecisionTreeClassifier`           | Decision Tree                      | Multiple criteria, pruning                |
-| `CatBoostClassifier`*              | CatBoost                           | Categorical features, GPU support         |
-| `XGBClassifier`*                   | XGBoost                            | Regularization, missing values            |
-| `LGBMClassifier`*                  | LightGBM                           | Fast GBDT, leaf-wise growth               |
+| Algorithm                        | Description                     | Key Features                              |
+| -------------------------------- | ------------------------------- | ----------------------------------------- |
+| `SVC`                            | Support Vector Classifier       | Non-linear kernels, probability estimates |
+| `LogisticRegression`             | Logistic Regression             | L1/L2/Elastic-Net regularization          |
+| `RidgeClassifier`                | Ridge Classifier                | L2 regularization, fast linear model      |
+| `KNeighborsClassifier`           | k-Nearest Neighbors             | Distance weighting, various metrics       |
+| `RandomForestClassifier`         | Random Forest                   | Feature importance, OOB score             |
+| `ExtraTreesClassifier`           | Extremely Randomized Trees      | Faster than RF, reduced variance          |
+| `AdaBoostClassifier`             | AdaBoost                        | Boosted ensemble, learning rate tuning    |
+| `GradientBoostingClassifier`     | Gradient Boosting               | Sequential boosting, feature subsampling  |
+| `HistGradientBoostingClassifier` | Histogram Gradient Boosting     | Fast GBDT, native NaN support             |
+| `MLPClassifier`                  | Neural Network                  | Multiple architectures, early stopping    |
+| `GaussianNB`                     | Gaussian Naive Bayes            | Fast, probabilistic                       |
+| `QDA`                            | Quadratic Discriminant Analysis | Non-linear boundaries                     |
+| `DecisionTreeClassifier`         | Decision Tree                   | Multiple criteria, pruning                |
+| `CatBoostClassifier`*            | CatBoost                        | Categorical features, GPU support         |
+| `XGBClassifier`*                 | XGBoost                         | Regularization, missing values            |
+| `LGBMClassifier`*                | LightGBM                        | Fast GBDT, leaf-wise growth               |
 
 ### Regression Algorithms
 
-| Algorithm                         | Description                        | Key Features                             |
-| --------------------------------- | ---------------------------------- | ---------------------------------------- |
-| `SVR`                             | Support Vector Regression          | Epsilon-insensitive loss                 |
-| `LinearRegression`                | Linear Regression                  | Simple, interpretable                    |
-| `Ridge`                           | Ridge Regression                   | L2 regularization, stable on collinear   |
-| `Lasso`                           | Lasso Regression                   | L1 regularization, feature selection     |
-| `ElasticNet`                      | Elastic Net                        | L1+L2 regularization, sparse solutions  |
-| `KNeighborsRegressor`             | k-Nearest Neighbors                | Local regression                         |
-| `RandomForestRegressor`           | Random Forest                      | Reduces overfitting                      |
-| `ExtraTreesRegressor`             | Extremely Randomized Trees         | Faster than RF, reduced variance         |
-| `AdaBoostRegressor`               | AdaBoost                           | Sequential learning                      |
-| `GradientBoostingRegressor`       | Gradient Boosting                  | Sequential boosting, feature subsampling |
-| `HistGradientBoostingRegressor`   | Histogram Gradient Boosting        | Fast GBDT, native NaN support            |
-| `MLPRegressor`                    | Neural Network                     | Non-linear patterns                      |
-| `DecisionTreeRegressor`           | Decision Tree                      | Non-parametric                           |
-| `CatBoostRegressor`*              | CatBoost                           | Handles categoricals                     |
-| `XGBRegressor`*                   | XGBoost                            | High performance                         |
-| `LGBMRegressor`*                  | LightGBM                           | Fast GBDT, leaf-wise growth              |
+| Algorithm                       | Description                 | Key Features                             |
+| ------------------------------- | --------------------------- | ---------------------------------------- |
+| `SVR`                           | Support Vector Regression   | Epsilon-insensitive loss                 |
+| `LinearRegression`              | Linear Regression           | Simple, interpretable                    |
+| `Ridge`                         | Ridge Regression            | L2 regularization, stable on collinear   |
+| `Lasso`                         | Lasso Regression            | L1 regularization, feature selection     |
+| `ElasticNet`                    | Elastic Net                 | L1+L2 regularization, sparse solutions   |
+| `KNeighborsRegressor`           | k-Nearest Neighbors         | Local regression                         |
+| `RandomForestRegressor`         | Random Forest               | Reduces overfitting                      |
+| `ExtraTreesRegressor`           | Extremely Randomized Trees  | Faster than RF, reduced variance         |
+| `AdaBoostRegressor`             | AdaBoost                    | Sequential learning                      |
+| `GradientBoostingRegressor`     | Gradient Boosting           | Sequential boosting, feature subsampling |
+| `HistGradientBoostingRegressor` | Histogram Gradient Boosting | Fast GBDT, native NaN support            |
+| `MLPRegressor`                  | Neural Network              | Non-linear patterns                      |
+| `DecisionTreeRegressor`         | Decision Tree               | Non-parametric                           |
+| `CatBoostRegressor`*            | CatBoost                    | Handles categoricals                     |
+| `XGBRegressor`*                 | XGBoost                     | High performance                         |
+| `LGBMRegressor`*                | LightGBM                    | Fast GBDT, leaf-wise growth              |
 
 *Optional dependencies (install separately)
 
-## ⚙️ Advanced Features
+## Advanced Features
 
 ### Early Stopping
 

@@ -30,7 +30,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip pytest
-        pip install optuml
+        pip install optuml[all]
 
     - name: Run tests
       run: |

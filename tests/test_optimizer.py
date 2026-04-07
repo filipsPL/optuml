@@ -350,3 +350,85 @@ def test_hist_gradient_boosting_max_depth_none(regression_data):
     estimator_params = optimizer.best_estimator_.get_params()
     # If max_depth_none was True, max_depth should be None in the final estimator
     assert "max_depth_none" not in estimator_params
+
+
+# ---------------------------------------------------------------------------
+# Pipeline compatibility tests
+# ---------------------------------------------------------------------------
+
+def test_pipeline_clone_preserves_params():
+    """sklearn.base.clone() must preserve all Optimizer params including cv_timeout."""
+    from sklearn.base import clone
+    opt = Optimizer(algorithm="SVC", n_trials=5, cv_timeout=60, random_state=7)
+    cloned = clone(opt)
+    assert cloned.get_params() == opt.get_params()
+    assert cloned._optimizer.cv_timeout == opt.cv_timeout
+    assert cloned._optimizer.random_state == opt.random_state
+
+
+def test_pipeline_fit_predict_classification(classification_data):
+    """Optimizer fits and predicts correctly when wrapped in a Pipeline."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    X_train, X_test, y_train, y_test = classification_data
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("opt", Optimizer(algorithm="GaussianNB", n_trials=3, random_state=42)),
+    ])
+    pipe.fit(X_train, y_train)
+    predictions = pipe.predict(X_test)
+    score = pipe.score(X_test, y_test)
+
+    assert isinstance(predictions, np.ndarray)
+    assert len(predictions) == len(y_test)
+    assert 0 <= score <= 1
+
+
+def test_pipeline_fit_predict_regression(regression_data):
+    """Optimizer fits and predicts correctly when wrapped in a Pipeline (regression)."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    X_train, X_test, y_train, y_test = regression_data
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("opt", Optimizer(algorithm="Ridge", n_trials=3, random_state=42)),
+    ])
+    pipe.fit(X_train, y_train)
+    predictions = pipe.predict(X_test)
+
+    assert isinstance(predictions, np.ndarray)
+    assert len(predictions) == len(y_test)
+
+
+def test_pipeline_set_params():
+    """Pipeline.set_params must propagate parameters into the nested Optimizer."""
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("opt", Optimizer(algorithm="SVC", n_trials=10, random_state=0)),
+    ])
+    pipe.set_params(opt__n_trials=3, opt__random_state=99)
+
+    assert pipe.named_steps["opt"].n_trials == 3
+    assert pipe.named_steps["opt"].random_state == 99
+    assert pipe.named_steps["opt"]._optimizer.n_trials == 3
+    assert pipe.named_steps["opt"]._optimizer.random_state == 99
+
+
+def test_cross_val_score_with_optimizer(classification_data):
+    """cross_val_score must work with Optimizer (clones estimator internally)."""
+    from sklearn.model_selection import cross_val_score
+
+    X_train, X_test, y_train, y_test = classification_data
+    X = np.vstack([X_train, X_test])
+    y = np.concatenate([y_train, y_test])
+
+    opt = Optimizer(algorithm="GaussianNB", n_trials=3, random_state=42)
+    scores = cross_val_score(opt, X, y, cv=2)
+
+    assert len(scores) == 2
+    assert all(0 <= s <= 1 for s in scores)

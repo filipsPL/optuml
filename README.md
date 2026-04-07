@@ -28,7 +28,17 @@ clf.fit(X_train, y_train)
 # Make predictions
 y_pred = clf.predict(X_test)
 accuracy = accuracy_score(y_test, y_pred)
+
+print(accuracy)
+# 0.9111111111111111
+print(y_pred[:10])
+# [1 1 1 1 0 0 2 2 0 0]
 ```
+
+## tl;dr why this module?
+
+*I want to make a fair comparison of ML methods, where 'fair' means that each method has tuned hyperparameters, making it the best version of itself.*
+
 
 ## Key Features
 

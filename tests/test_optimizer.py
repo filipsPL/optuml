@@ -461,6 +461,7 @@ def test_benchmark_classification_fit_and_attributes(classification_data):
         algorithms=_BENCHMARK_CLASSIFIERS,
         n_trials=3,
         random_state=42,
+        include_dummy=False,
     )
     bench.fit(X_train, y_train)
 
@@ -544,7 +545,7 @@ def test_benchmark_summary_before_fit_raises():
 
 
 def test_benchmark_result_fields(classification_data):
-    """Each entry in results_ has the expected keys."""
+    """Each entry in results_ has the expected keys (dummy entries have extra internal keys)."""
     X_train, _, y_train, _ = classification_data
 
     bench = AlgorithmBenchmark(
@@ -552,6 +553,7 @@ def test_benchmark_result_fields(classification_data):
         algorithms=_BENCHMARK_CLASSIFIERS,
         n_trials=3,
         random_state=42,
+        include_dummy=False,
     )
     bench.fit(X_train, y_train)
 
@@ -562,3 +564,95 @@ def test_benchmark_result_fields(classification_data):
         assert result["fit_time"] > 0
         assert result["error"] is None
         assert result["optimizer"] is not None
+
+
+def test_benchmark_dummy_classification(classification_data):
+    """Dummy classifier appears in results_, sets dummy_score_, never wins best_algorithm_."""
+    X_train, X_test, y_train, y_test = classification_data
+
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=3,
+        random_state=42,
+        include_dummy=True,
+    )
+    bench.fit(X_train, y_train)
+
+    dummy_results = [r for r in bench.results_ if r.get("_is_dummy")]
+    assert len(dummy_results) == 1
+    assert "DummyClassifier" in dummy_results[0]["algorithm"]
+    assert 0 <= dummy_results[0]["best_score"] <= 1
+
+    assert hasattr(bench, "dummy_score_")
+    assert hasattr(bench, "dummy_estimator_")
+    assert bench.dummy_estimator_ is not None
+    assert "DummyClassifier" not in bench.best_algorithm_
+
+    # dummy must not appear in optimizers_
+    assert all("Dummy" not in k for k in bench.optimizers_)
+
+
+def test_benchmark_dummy_regression(regression_data):
+    """Dummy regressor appears in results_ and sets dummy_score_."""
+    X_train, _, y_train, _ = regression_data
+
+    bench = AlgorithmBenchmark(
+        task="regression",
+        algorithms=_BENCHMARK_REGRESSORS,
+        n_trials=3,
+        random_state=42,
+        include_dummy=True,
+    )
+    bench.fit(X_train, y_train)
+
+    dummy_results = [r for r in bench.results_ if r.get("_is_dummy")]
+    assert len(dummy_results) == 1
+    assert "DummyRegressor" in dummy_results[0]["algorithm"]
+
+    assert hasattr(bench, "dummy_score_")
+    assert "DummyRegressor" not in bench.best_algorithm_
+
+
+def test_benchmark_dummy_in_summary(classification_data):
+    """summary() includes the dummy row with is_dummy=True."""
+    X_train, _, y_train, _ = classification_data
+
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=3,
+        random_state=42,
+        include_dummy=True,
+    )
+    bench.fit(X_train, y_train)
+    summary = bench.summary()
+
+    try:
+        import pandas as pd
+        dummy_rows = summary[summary["is_dummy"] == True]
+        assert len(dummy_rows) == 1
+        total_rows = len(summary)
+    except ImportError:
+        dummy_rows = [r for r in summary if r["is_dummy"]]
+        assert len(dummy_rows) == 1
+        total_rows = len(summary)
+
+    assert total_rows == len(_BENCHMARK_CLASSIFIERS) + 1
+
+
+def test_benchmark_include_dummy_false(classification_data):
+    """include_dummy=False produces no dummy entry and no dummy_score_ attribute."""
+    X_train, _, y_train, _ = classification_data
+
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=3,
+        include_dummy=False,
+    )
+    bench.fit(X_train, y_train)
+
+    assert not any(r.get("_is_dummy") for r in bench.results_)
+    assert not hasattr(bench, "dummy_score_")
+    assert len(bench.results_) == len(_BENCHMARK_CLASSIFIERS)

@@ -7,6 +7,9 @@ save results to CSV files.
 import warnings
 warnings.filterwarnings("ignore")
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend; must be set before pyplot import
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker

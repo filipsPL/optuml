@@ -1457,6 +1457,13 @@ class AlgorithmBenchmark:
         Set to ``-1`` to use all available cores.
     verbose : bool or int, default False
         Verbosity level forwarded to each Optimizer.
+    include_dummy : bool, default True
+        Whether to include a dummy baseline (``DummyClassifier`` with
+        ``strategy="most_frequent"`` for classification, ``DummyRegressor``
+        with ``strategy="mean"`` for regression).  The dummy is evaluated with
+        the same CV setup but bypasses Optuna entirely.  It is always excluded
+        from ``best_algorithm_`` / ``best_estimator_`` selection so it cannot
+        "win", but appears in ``results_`` and ``summary()`` for reference.
     """
 
     def __init__(
@@ -1474,6 +1481,7 @@ class AlgorithmBenchmark:
         n_jobs: int = 1,
         n_jobs_algorithms: int = 1,
         verbose: Union[bool, int] = False,
+        include_dummy: bool = True,
     ):
         if task not in ("classification", "regression"):
             raise ValueError("task must be 'classification' or 'regression'")
@@ -1509,6 +1517,54 @@ class AlgorithmBenchmark:
         self.n_jobs = n_jobs
         self.n_jobs_algorithms = n_jobs_algorithms
         self.verbose = verbose
+        self.include_dummy = include_dummy
+
+    def _run_dummy(self, X, y):
+        """Evaluate the dummy baseline via cross-validation (no Optuna)."""
+        import time as _time
+        from sklearn.model_selection import cross_val_score
+
+        if self.task == "classification":
+            from sklearn.dummy import DummyClassifier
+            dummy = DummyClassifier(strategy="most_frequent",
+                                    random_state=self.random_state)
+            label = "DummyClassifier(most_frequent)"
+        else:
+            from sklearn.dummy import DummyRegressor
+            dummy = DummyRegressor(strategy="mean")
+            label = "DummyRegressor(mean)"
+
+        scoring = self.scoring or ("accuracy" if self.task == "classification" else "r2")
+        t0 = _time.monotonic()
+        try:
+            scores = cross_val_score(dummy, X, y, cv=self.cv, scoring=scoring,
+                                     n_jobs=self.n_jobs)
+            dummy.fit(X, y)
+            elapsed = _time.monotonic() - t0
+            return {
+                "algorithm": label,
+                "best_score": float(scores.mean()),
+                "best_params": {},
+                "n_trials_completed": 1,
+                "fit_time": elapsed,
+                "error": None,
+                "optimizer": None,
+                "_dummy_estimator": dummy,
+                "_is_dummy": True,
+            }
+        except Exception as exc:
+            elapsed = _time.monotonic() - t0
+            return {
+                "algorithm": label,
+                "best_score": float("nan"),
+                "best_params": {},
+                "n_trials_completed": 0,
+                "fit_time": elapsed,
+                "error": str(exc),
+                "optimizer": None,
+                "_dummy_estimator": None,
+                "_is_dummy": True,
+            }
 
     def _run_one(self, algorithm, X, y):
         """Fit a single Optimizer and return a result dict."""
@@ -1570,10 +1626,14 @@ class AlgorithmBenchmark:
             delayed(self._run_one)(alg, X, y) for alg in self.algorithms
         )
 
+        if self.include_dummy:
+            results.append(self._run_dummy(X, y))
+
         self.results_ = results
 
-        # Pick the best among succeeded runs
-        succeeded = [r for r in results if r["error"] is None]
+        # Pick the best among real (non-dummy) succeeded runs
+        succeeded = [r for r in results
+                     if r["error"] is None and not r.get("_is_dummy", False)]
         if not succeeded:
             raise RuntimeError("All algorithms failed. Check errors in results_.")
 
@@ -1586,7 +1646,16 @@ class AlgorithmBenchmark:
         self.best_score_ = best["best_score"]
         self.best_estimator_ = best["optimizer"].best_estimator_
         self.best_params_ = best["optimizer"].best_params_
-        self.optimizers_ = {r["algorithm"]: r["optimizer"] for r in results}
+        self.optimizers_ = {
+            r["algorithm"]: r["optimizer"]
+            for r in results
+            if not r.get("_is_dummy", False)
+        }
+
+        dummy_result = next((r for r in results if r.get("_is_dummy")), None)
+        if dummy_result:
+            self.dummy_score_ = dummy_result["best_score"]
+            self.dummy_estimator_ = dummy_result.get("_dummy_estimator")
 
         return self
 
@@ -1608,6 +1677,7 @@ class AlgorithmBenchmark:
                 "n_trials_completed": r["n_trials_completed"],
                 "fit_time": r["fit_time"],
                 "error": r["error"],
+                "is_dummy": r.get("_is_dummy", False),
             }
             for r in self.results_
         ]

@@ -1,3 +1,7 @@
+# This script tests all supported algorithms in the Optimizer class on the Iris dataset for classification and the Diabetes dataset for regression.
+# It is done one by one. Now we have a better way to test all algorithms at once using `AlgorithmBenchmark` class.
+# Check `examples/example-benchmark-all.py` for the alternative approach.
+
 import warnings
 import numpy as np
 from sklearn.datasets import load_iris, load_diabetes

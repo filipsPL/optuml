@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.datasets import load_iris, load_diabetes, load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, r2_score, log_loss
-from optuml import Optimizer
+from optuml import Optimizer, AlgorithmBenchmark
 
 # Suppress warnings for cleaner test output
 import warnings
@@ -432,3 +432,133 @@ def test_cross_val_score_with_optimizer(classification_data):
 
     assert len(scores) == 2
     assert all(0 <= s <= 1 for s in scores)
+
+
+# ---------------------------------------------------------------------------
+# AlgorithmBenchmark tests
+# ---------------------------------------------------------------------------
+
+_BENCHMARK_CLASSIFIERS = ["GaussianNB", "KNeighborsClassifier"]
+_BENCHMARK_REGRESSORS = ["Ridge", "KNeighborsRegressor"]
+
+
+def test_benchmark_invalid_task():
+    with pytest.raises(ValueError, match="task must be"):
+        AlgorithmBenchmark(task="clustering")
+
+
+def test_benchmark_invalid_algorithm():
+    with pytest.raises(ValueError, match="Unknown algorithms"):
+        AlgorithmBenchmark(task="classification", algorithms=["Ridge"])
+
+
+def test_benchmark_classification_fit_and_attributes(classification_data):
+    """fit() populates all expected attributes for a classification benchmark."""
+    X_train, X_test, y_train, y_test = classification_data
+
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=3,
+        random_state=42,
+    )
+    bench.fit(X_train, y_train)
+
+    assert hasattr(bench, "results_")
+    assert hasattr(bench, "best_algorithm_")
+    assert hasattr(bench, "best_score_")
+    assert hasattr(bench, "best_estimator_")
+    assert hasattr(bench, "best_params_")
+    assert hasattr(bench, "optimizers_")
+
+    assert bench.best_algorithm_ in _BENCHMARK_CLASSIFIERS
+    assert 0 <= bench.best_score_ <= 1
+    assert set(bench.optimizers_.keys()) == set(_BENCHMARK_CLASSIFIERS)
+    assert len(bench.results_) == len(_BENCHMARK_CLASSIFIERS)
+
+
+def test_benchmark_regression_fit_and_attributes(regression_data):
+    """fit() populates all expected attributes for a regression benchmark."""
+    X_train, X_test, y_train, y_test = regression_data
+
+    bench = AlgorithmBenchmark(
+        task="regression",
+        algorithms=_BENCHMARK_REGRESSORS,
+        n_trials=3,
+        random_state=42,
+    )
+    bench.fit(X_train, y_train)
+
+    assert bench.best_algorithm_ in _BENCHMARK_REGRESSORS
+    assert bench.best_estimator_ is not None
+
+
+def test_benchmark_best_estimator_can_predict(classification_data):
+    """best_estimator_ from benchmark can predict on held-out data."""
+    X_train, X_test, y_train, y_test = classification_data
+
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=3,
+        random_state=42,
+    )
+    bench.fit(X_train, y_train)
+    preds = bench.best_estimator_.predict(X_test)
+
+    assert isinstance(preds, np.ndarray)
+    assert len(preds) == len(y_test)
+
+
+def test_benchmark_summary_returns_sorted_results(classification_data):
+    """summary() returns results sorted by score descending."""
+    X_train, X_test, y_train, y_test = classification_data
+
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=3,
+        random_state=42,
+    )
+    bench.fit(X_train, y_train)
+    summary = bench.summary()
+
+    # Works whether pandas is available or not
+    try:
+        import pandas as pd
+        assert isinstance(summary, pd.DataFrame)
+        scores = summary["best_score"].tolist()
+    except ImportError:
+        assert isinstance(summary, list)
+        scores = [r["best_score"] for r in summary]
+
+    # NaNs (failures) are pushed to the end; valid scores are descending
+    valid_scores = [s for s in scores if s == s]
+    assert valid_scores == sorted(valid_scores, reverse=True)
+
+
+def test_benchmark_summary_before_fit_raises():
+    bench = AlgorithmBenchmark(task="classification", algorithms=_BENCHMARK_CLASSIFIERS)
+    with pytest.raises(RuntimeError, match="Call fit\\(\\)"):
+        bench.summary()
+
+
+def test_benchmark_result_fields(classification_data):
+    """Each entry in results_ has the expected keys."""
+    X_train, _, y_train, _ = classification_data
+
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=3,
+        random_state=42,
+    )
+    bench.fit(X_train, y_train)
+
+    expected_keys = {"algorithm", "best_score", "best_params", "n_trials_completed",
+                     "fit_time", "error", "optimizer"}
+    for result in bench.results_:
+        assert set(result.keys()) == expected_keys
+        assert result["fit_time"] > 0
+        assert result["error"] is None
+        assert result["optimizer"] is not None

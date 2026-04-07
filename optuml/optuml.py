@@ -1416,3 +1416,208 @@ class Optimizer(BaseEstimator):
             self._optimizer._validate_params()
 
         return self
+
+
+class AlgorithmBenchmark:
+    """
+    Benchmark all (or a subset of) supported algorithms on a dataset.
+
+    Runs an independent Optimizer for each algorithm, collects results, and
+    exposes the best-performing estimator.  Not a scikit-learn estimator —
+    intentionally outside the BaseEstimator contract so there are no
+    clone/Pipeline compatibility constraints.
+
+    Parameters
+    ----------
+    task : str
+        Either ``"classification"`` or ``"regression"``.
+    algorithms : list of str or ``"all"``, default ``"all"``
+        Algorithms to benchmark.  Pass a list to restrict the comparison.
+    direction : str, default ``"maximize"``
+        Optuna optimization direction.
+    n_trials : int, default 50
+        Number of Optuna trials per algorithm.
+    timeout : float or None, default None
+        Per-algorithm wall-clock timeout for the Optuna study (seconds).
+    cv : int, default 5
+        Cross-validation folds.
+    scoring : str or None, default None
+        Scoring metric.  Defaults to ``"accuracy"`` for classification and
+        ``"r2"`` for regression when ``None``.
+    cv_timeout : float, default 120
+        Timeout for a single CV evaluation (seconds).
+    random_state : int or None, default None
+        Random state passed to every Optimizer.
+    early_stopping_patience : int or None, default None
+        Early stopping patience passed to every Optimizer.
+    n_jobs : int, default 1
+        Parallel jobs for CV inside each Optimizer.
+    n_jobs_algorithms : int, default 1
+        Number of algorithms to run in parallel.  Uses ``joblib.Parallel``.
+        Set to ``-1`` to use all available cores.
+    verbose : bool or int, default False
+        Verbosity level forwarded to each Optimizer.
+    """
+
+    def __init__(
+        self,
+        task: str,
+        algorithms="all",
+        direction: str = "maximize",
+        n_trials: int = 50,
+        timeout: Optional[float] = None,
+        cv: int = 5,
+        scoring: Optional[str] = None,
+        cv_timeout: float = 120,
+        random_state: Optional[int] = None,
+        early_stopping_patience: Optional[int] = None,
+        n_jobs: int = 1,
+        n_jobs_algorithms: int = 1,
+        verbose: Union[bool, int] = False,
+    ):
+        if task not in ("classification", "regression"):
+            raise ValueError("task must be 'classification' or 'regression'")
+
+        if algorithms == "all":
+            if task == "classification":
+                algorithms = list(ClassifierOptimizer._get_supported_algorithms())
+            else:
+                algorithms = list(RegressorOptimizer._get_supported_algorithms())
+        else:
+            supported = (
+                ClassifierOptimizer._get_supported_algorithms()
+                if task == "classification"
+                else RegressorOptimizer._get_supported_algorithms()
+            )
+            unknown = [a for a in algorithms if a not in supported]
+            if unknown:
+                raise ValueError(
+                    f"Unknown algorithms for task='{task}': {unknown}. "
+                    f"Supported: {list(supported)}"
+                )
+
+        self.task = task
+        self.algorithms = algorithms
+        self.direction = direction
+        self.n_trials = n_trials
+        self.timeout = timeout
+        self.cv = cv
+        self.scoring = scoring
+        self.cv_timeout = cv_timeout
+        self.random_state = random_state
+        self.early_stopping_patience = early_stopping_patience
+        self.n_jobs = n_jobs
+        self.n_jobs_algorithms = n_jobs_algorithms
+        self.verbose = verbose
+
+    def _run_one(self, algorithm, X, y):
+        """Fit a single Optimizer and return a result dict."""
+        import time as _time
+        opt = Optimizer(
+            algorithm=algorithm,
+            direction=self.direction,
+            verbose=self.verbose,
+            n_trials=self.n_trials,
+            timeout=self.timeout,
+            cv=self.cv,
+            scoring=self.scoring,
+            cv_timeout=self.cv_timeout,
+            random_state=self.random_state,
+            early_stopping_patience=self.early_stopping_patience,
+            n_jobs=self.n_jobs,
+        )
+        t0 = _time.monotonic()
+        try:
+            opt.fit(X, y)
+            elapsed = _time.monotonic() - t0
+            return {
+                "algorithm": algorithm,
+                "best_score": opt.best_score_,
+                "best_params": opt.best_params_,
+                "n_trials_completed": opt.n_trials_completed_,
+                "fit_time": elapsed,
+                "error": None,
+                "optimizer": opt,
+            }
+        except Exception as exc:
+            elapsed = _time.monotonic() - t0
+            return {
+                "algorithm": algorithm,
+                "best_score": float("nan"),
+                "best_params": {},
+                "n_trials_completed": 0,
+                "fit_time": elapsed,
+                "error": str(exc),
+                "optimizer": None,
+            }
+
+    def fit(self, X, y):
+        """
+        Run the benchmark on data ``(X, y)``.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+        y : array-like of shape (n_samples,)
+
+        Returns
+        -------
+        self
+        """
+        from joblib import Parallel, delayed
+
+        results = Parallel(n_jobs=self.n_jobs_algorithms)(
+            delayed(self._run_one)(alg, X, y) for alg in self.algorithms
+        )
+
+        self.results_ = results
+
+        # Pick the best among succeeded runs
+        succeeded = [r for r in results if r["error"] is None]
+        if not succeeded:
+            raise RuntimeError("All algorithms failed. Check errors in results_.")
+
+        if self.direction == "maximize":
+            best = max(succeeded, key=lambda r: r["best_score"])
+        else:
+            best = min(succeeded, key=lambda r: r["best_score"])
+
+        self.best_algorithm_ = best["algorithm"]
+        self.best_score_ = best["best_score"]
+        self.best_estimator_ = best["optimizer"].best_estimator_
+        self.best_params_ = best["optimizer"].best_params_
+        self.optimizers_ = {r["algorithm"]: r["optimizer"] for r in results}
+
+        return self
+
+    def summary(self):
+        """
+        Return benchmark results sorted by score.
+
+        Returns a ``pandas.DataFrame`` if pandas is available, otherwise a
+        list of dicts (keys: algorithm, best_score, n_trials_completed,
+        fit_time, error).
+        """
+        if not hasattr(self, "results_"):
+            raise RuntimeError("Call fit() before summary().")
+
+        rows = [
+            {
+                "algorithm": r["algorithm"],
+                "best_score": r["best_score"],
+                "n_trials_completed": r["n_trials_completed"],
+                "fit_time": r["fit_time"],
+                "error": r["error"],
+            }
+            for r in self.results_
+        ]
+
+        ascending = self.direction == "minimize"
+        rows.sort(key=lambda r: (r["best_score"] != r["best_score"], r["best_score"]),
+                  reverse=not ascending)
+
+        try:
+            import pandas as pd
+            return pd.DataFrame(rows).reset_index(drop=True)
+        except ImportError:
+            return rows

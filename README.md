@@ -48,6 +48,7 @@ print(y_pred[:10])
 - **Type-Safe Design**: Separate optimizers for classification and regression with proper type checking
 - **Production Ready**: Cross-platform compatibility, comprehensive error handling, and extensive validation
 - **Flexible Configuration**: Control every aspect of the optimization process
+- **Benchmarking** of multiple algorithms at once, see [benchmarking](#algorithm-benchmarking)
 
 ## Installation
 
@@ -294,6 +295,95 @@ pipe.fit(X_train, y_train)
 predictions = pipe.predict(X_test)
 ```
 
+### Algorithm Benchmarking
+
+`AlgorithmBenchmark` runs every supported algorithm (or a chosen subset) on your data, optimizes each one independently, and reports a ranked comparison — without any scikit-learn estimator constraints. Check [sample script](examples/example-benchmark-all.py) and [outputs](examples/benchmark_results/).
+
+```python
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+from optuml import AlgorithmBenchmark
+
+X, y = load_iris(return_X_y=True)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+bench = AlgorithmBenchmark(
+    task="classification",   # "classification" or "regression"
+    n_trials=50,
+    random_state=42,
+)
+bench.fit(X_train, y_train)
+
+# Ranked results as a DataFrame (requires pandas) or list of dicts
+print(bench.summary())
+#                      algorithm  best_score  n_trials_completed  fit_time error
+# 0         RandomForestClassifier    0.983333                  50      4.21  None
+# 1           ExtraTreesClassifier    0.975000                  50      3.87  None
+# ...
+
+print(bench.best_algorithm_)   # e.g. "RandomForestClassifier"
+print(bench.best_score_)       # best CV score across all algorithms
+
+# Use the winning estimator directly
+predictions = bench.best_estimator_.predict(X_test)
+
+# Or drill into any individual optimizer
+rf_optimizer = bench.optimizers_["RandomForestClassifier"]
+print(rf_optimizer.best_params_)
+```
+
+To benchmark a specific subset of algorithms:
+
+```python
+bench = AlgorithmBenchmark(
+    task="regression",
+    algorithms=["Ridge", "RandomForestRegressor", "XGBRegressor"],
+    n_trials=50,
+    scoring="r2",
+)
+bench.fit(X_train, y_train)
+```
+
+Run algorithms in parallel across CPU cores with `n_jobs_algorithms`:
+
+```python
+bench = AlgorithmBenchmark(
+    task="classification",
+    n_trials=50,
+    n_jobs_algorithms=-1,   # one process per algorithm, all cores
+)
+```
+
+#### `AlgorithmBenchmark` Parameters
+
+| Parameter                 | Type           | Default      | Description                                         |
+| ------------------------- | -------------- | ------------ | --------------------------------------------------- |
+| `task`                    | str            | required     | `"classification"` or `"regression"`                |
+| `algorithms`              | list or `"all"`| `"all"`      | Algorithms to benchmark                             |
+| `n_trials`                | int            | 50           | Optuna trials per algorithm                         |
+| `timeout`                 | float/None     | None         | Per-algorithm study timeout (seconds)               |
+| `cv`                      | int            | 5            | Cross-validation folds                              |
+| `scoring`                 | str/None       | Auto*        | Scoring metric                                      |
+| `cv_timeout`              | float          | 120          | Per-trial CV timeout (seconds)                      |
+| `random_state`            | int/None       | None         | Random seed forwarded to every `Optimizer`          |
+| `early_stopping_patience` | int/None       | None         | Early stopping patience per algorithm               |
+| `n_jobs`                  | int            | 1            | Parallel CV jobs inside each `Optimizer`            |
+| `n_jobs_algorithms`       | int            | 1            | Algorithms to run in parallel (`-1` = all cores)    |
+| `verbose`                 | bool/int       | False        | Verbosity forwarded to each `Optimizer`             |
+
+*Auto defaults: `"accuracy"` for classification, `"r2"` for regression
+
+#### Attributes after `fit()`
+
+| Attribute           | Description                                              |
+| ------------------- | -------------------------------------------------------- |
+| `best_algorithm_`   | Name of the best-scoring algorithm                       |
+| `best_estimator_`   | Fitted sklearn estimator from the winning optimizer      |
+| `best_score_`       | Best CV score across all algorithms                      |
+| `best_params_`      | Hyperparameters of the winning optimizer                 |
+| `results_`          | List of per-algorithm result dicts (including failures)  |
+| `optimizers_`       | `dict[algorithm_name, Optimizer]` for full introspection |
+
 ### Type-Specific Optimizers
 
 For more control, use the specific optimizer classes:
@@ -427,7 +517,7 @@ pip install catboost xgboost lightgbm
    Optimizer(n_jobs=-1)
    ```
 
-## Benchmark
+## Benchmark results
 
 See [this page](benchmark/README.md) for benchmark results.
 

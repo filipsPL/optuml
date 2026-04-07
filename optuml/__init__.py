@@ -1,1 +1,1 @@
-from .optuml import Optimizer
+from .optuml import Optimizer, AlgorithmBenchmark

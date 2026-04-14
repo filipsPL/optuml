@@ -7,8 +7,10 @@
 
 `OptuML` (*Optu*na + *ML*) is a Python module providing hyperparameter optimization for machine learning algorithms using the [Optuna](https://optuna.org/) framework. The module offers a scikit-learn compatible API with enhanced features for robust optimization.
 
-[![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17305964.svg)](https://doi.org/10.5281/zenodo.17305963)
+[![Python manual install](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-package.yml) [![Python pip install](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/python-pip.yml) [![pypi version](https://img.shields.io/pypi/v/optuml)](https://pypi.org/project/optuml/) [![CodeQL Advanced](https://github.com/filipsPL/optuml/actions/workflows/codeql.yml/badge.svg)](https://github.com/filipsPL/optuml/actions/workflows/codeql.yml)
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17305964.svg)](https://doi.org/10.5281/zenodo.17305963)
+ 
 ## tl;dr
 
 ```python

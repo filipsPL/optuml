@@ -198,8 +198,12 @@ def test_optimizer_timeout(classification_data):
     )
     optimizer.fit(X_train, y_train)
 
-    # The study should stop before completing all trials due to timeout
-    assert optimizer.study_time_ <= 6  # Allowing a small buffer
+    # Primary intent: the timeout must stop the study well before all 1000 trials run.
+    assert optimizer.n_trials_completed_ < 1000
+    # Wall-clock should be close to the timeout. The bound is generous because Optuna
+    # only checks the timeout between trials, so one in-flight trial can overrun it
+    # (and the exact overrun depends on machine load).
+    assert optimizer.study_time_ <= 15
 
 
 def test_optimizer_direction_minimize(regression_data):
@@ -656,3 +660,107 @@ def test_benchmark_include_dummy_false(classification_data):
     assert not any(r.get("_is_dummy") for r in bench.results_)
     assert not hasattr(bench, "dummy_score_")
     assert len(bench.results_) == len(_BENCHMARK_CLASSIFIERS)
+
+
+# ---------------------------------------------------------------------------
+# Feature scaling (#3)
+# ---------------------------------------------------------------------------
+
+def test_scale_auto_wraps_scale_sensitive(classification_data):
+    """scale='auto' wraps scale-sensitive algorithms (SVC) in a StandardScaler pipeline."""
+    from sklearn.pipeline import Pipeline
+    X_train, _, y_train, _ = classification_data
+    opt = Optimizer(algorithm="SVC", n_trials=3, random_state=42).fit(X_train, y_train)
+    assert isinstance(opt.best_estimator_, Pipeline)
+    assert "scaler" in opt.best_estimator_.named_steps
+
+
+def test_scale_auto_leaves_trees_unscaled(classification_data):
+    """scale='auto' does NOT wrap scale-invariant algorithms (RandomForest)."""
+    from sklearn.pipeline import Pipeline
+    X_train, _, y_train, _ = classification_data
+    opt = Optimizer(algorithm="RandomForestClassifier", n_trials=3, random_state=42).fit(X_train, y_train)
+    assert not isinstance(opt.best_estimator_, Pipeline)
+
+
+def test_scale_false_disables_scaling(classification_data):
+    """scale=False keeps even scale-sensitive algorithms unwrapped."""
+    from sklearn.pipeline import Pipeline
+    X_train, _, y_train, _ = classification_data
+    opt = Optimizer(algorithm="SVC", n_trials=3, random_state=42, scale=False).fit(X_train, y_train)
+    assert not isinstance(opt.best_estimator_, Pipeline)
+
+
+def test_scale_true_forces_scaling(regression_data):
+    """scale=True wraps an otherwise scale-invariant algorithm."""
+    from sklearn.pipeline import Pipeline
+    X_train, _, y_train, _ = regression_data
+    opt = Optimizer(algorithm="DecisionTreeRegressor", n_trials=3, random_state=42, scale=True).fit(X_train, y_train)
+    assert isinstance(opt.best_estimator_, Pipeline)
+
+
+def test_scale_invalid_value_raises():
+    with pytest.raises(ValueError, match="scale must be"):
+        Optimizer(algorithm="SVC", scale="sometimes")
+
+
+def test_scale_param_is_cloned():
+    """scale must round-trip through get_params/clone (sklearn compatibility)."""
+    from sklearn.base import clone
+    opt = Optimizer(algorithm="SVC", scale=False, random_state=1)
+    assert opt.get_params()["scale"] is False
+    assert clone(opt).get_params()["scale"] is False
+
+
+# ---------------------------------------------------------------------------
+# Seeded, shuffled cross-validation (#5)
+# ---------------------------------------------------------------------------
+
+def test_cv_splitter_is_shuffled_and_seeded():
+    """int cv builds a shuffled, random_state-seeded stratified/plain KFold."""
+    from optuml.optuml import ClassifierOptimizer, RegressorOptimizer
+    from sklearn.model_selection import StratifiedKFold, KFold
+    cv_c = ClassifierOptimizer(algorithm="SVC", cv=5, random_state=42)._make_cv()
+    cv_r = RegressorOptimizer(algorithm="Ridge", cv=5, random_state=42)._make_cv()
+    assert isinstance(cv_c, StratifiedKFold) and cv_c.shuffle and cv_c.random_state == 42
+    assert isinstance(cv_r, KFold) and cv_r.shuffle and cv_r.random_state == 42
+
+
+def test_same_seed_is_reproducible(regression_data):
+    """Same random_state -> identical best_score_ (folds are seeded)."""
+    X_train, _, y_train, _ = regression_data
+    a = Optimizer(algorithm="Ridge", n_trials=6, random_state=1).fit(X_train, y_train).best_score_
+    b = Optimizer(algorithm="Ridge", n_trials=6, random_state=1).fit(X_train, y_train).best_score_
+    assert a == pytest.approx(b)
+
+
+def test_custom_cv_splitter_accepted(classification_data):
+    """A cross-validation splitter object passed as cv is used as-is."""
+    from sklearn.model_selection import StratifiedKFold
+    X_train, _, y_train, _ = classification_data
+    splitter = StratifiedKFold(n_splits=3, shuffle=True, random_state=7)
+    opt = Optimizer(algorithm="GaussianNB", n_trials=3, cv=splitter, random_state=0).fit(X_train, y_train)
+    assert 0 <= opt.best_score_ <= 1
+
+
+# ---------------------------------------------------------------------------
+# Nested cross-validation (#4)
+# ---------------------------------------------------------------------------
+
+def test_nested_score_returns_per_fold_scores(classification_data):
+    """nested_score returns one score per outer fold and a sane mean."""
+    X_train, _, y_train, _ = classification_data
+    opt = Optimizer(algorithm="GaussianNB", n_trials=3, random_state=42)
+    scores = opt.nested_score(X_train, y_train, outer_cv=3)
+    assert len(scores) == 3
+    assert all(0 <= s <= 1 for s in scores)
+
+
+def test_nested_score_does_not_require_fit(regression_data):
+    """nested_score works on an unfitted optimizer (it refits per fold internally)."""
+    X_train, _, y_train, _ = regression_data
+    opt = Optimizer(algorithm="Ridge", n_trials=3, random_state=42)
+    scores = opt.nested_score(X_train, y_train, outer_cv=3)
+    assert len(scores) == 3
+    # optimizer itself remains unfitted
+    assert not hasattr(opt, "best_estimator_")

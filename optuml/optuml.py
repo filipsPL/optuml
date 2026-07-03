@@ -74,6 +74,42 @@ def _make_logistic_regression(**kwargs):
         return LogisticRegression(**kwargs)
 
 
+# Algorithms whose performance depends materially on feature scaling (distance-based,
+# gradient-based, or regularized-linear models). Tree ensembles, naive Bayes, QDA and
+# plain OLS are scale-invariant for prediction and are intentionally excluded, so
+# scale="auto" leaves them untouched.
+_SCALE_SENSITIVE_ALGORITHMS = frozenset({
+    # classifiers
+    "SVC", "KNeighborsClassifier", "MLPClassifier", "LogisticRegression",
+    "RidgeClassifier", "SGDClassifier",
+    # regressors
+    "SVR", "KNeighborsRegressor", "MLPRegressor", "Ridge", "Lasso", "ElasticNet",
+    "SGDRegressor",
+})
+
+
+def _nested_cv_score(estimator, X, y, scoring, outer_cv, random_state, stratify):
+    """Unbiased generalization estimate via nested cross-validation.
+
+    Clones ``estimator`` (an unfitted optimizer) and evaluates it with
+    ``cross_val_score``: each outer fold triggers a full, independent
+    hyperparameter search on the outer-training data and scores on the held-out
+    outer fold. The hyperparameters are therefore never selected on the data they
+    are scored on, so the result is not contaminated by the search (unlike
+    ``best_score_``). Returns the array of per-fold scores.
+    """
+    from sklearn.base import clone
+    from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
+
+    if isinstance(outer_cv, int):
+        splitter_cls = StratifiedKFold if stratify else KFold
+        outer_cv = splitter_cls(n_splits=outer_cv, shuffle=True, random_state=random_state)
+
+    return cross_val_score(
+        clone(estimator), X, y, cv=outer_cv, scoring=scoring, n_jobs=1, error_score="raise"
+    )
+
+
 class OptimizerBase(BaseEstimator):
     """Base class for Optuna-based optimizers"""
 
@@ -91,6 +127,7 @@ class OptimizerBase(BaseEstimator):
         random_state: Optional[int] = None,
         early_stopping_patience: Optional[int] = None,
         n_jobs: int = 1,
+        scale: Union[bool, str] = "auto",
     ):
         """
         Initialize the optimizer.
@@ -109,8 +146,11 @@ class OptimizerBase(BaseEstimator):
             Number of trials for optimization
         timeout : float or None, default=None
             Maximum time allowed for optimization (seconds)
-        cv : int, default=5
-            Number of cross-validation folds
+        cv : int or cross-validation splitter, default=5
+            Number of cross-validation folds. An int builds a shuffled,
+            ``random_state``-seeded StratifiedKFold (classification) or KFold
+            (regression) so folds are reproducible and not biased by row order.
+            A splitter object is used as-is.
         scoring : str or None, default=None
             Scoring method for cross-validation
         cv_timeout : float, default=120
@@ -121,6 +161,13 @@ class OptimizerBase(BaseEstimator):
             Number of trials without improvement before stopping
         n_jobs : int, default=1
             Number of parallel jobs for cross-validation
+        scale : bool or {'auto'}, default='auto'
+            Feature scaling policy. ``'auto'`` wraps only scale-sensitive
+            algorithms (SVM, KNN, MLP, regularized-linear models) in a
+            StandardScaler, leaving scale-invariant models (trees, naive Bayes,
+            OLS) untouched. ``True`` always scales, ``False`` never scales. The
+            scaler is fit inside each CV fold (and on the final training data),
+            so no information leaks from validation folds.
         """
         self.algorithm = algorithm
         self.direction = direction
@@ -134,6 +181,7 @@ class OptimizerBase(BaseEstimator):
         self.random_state = random_state
         self.early_stopping_patience = early_stopping_patience
         self.n_jobs = n_jobs
+        self.scale = scale
 
         # Validate parameters
         self._validate_params()
@@ -142,7 +190,7 @@ class OptimizerBase(BaseEstimator):
         """Validate initialization parameters"""
         if self.n_trials <= 0:
             raise ValueError("n_trials must be positive")
-        if self.cv <= 1:
+        if isinstance(self.cv, int) and self.cv <= 1:
             raise ValueError("cv must be at least 2")
         if self.direction not in ["maximize", "minimize"]:
             raise ValueError("direction must be 'maximize' or 'minimize'")
@@ -152,6 +200,63 @@ class OptimizerBase(BaseEstimator):
             raise ValueError("cv_timeout must be positive")
         if self.early_stopping_patience is not None and self.early_stopping_patience <= 0:
             raise ValueError("early_stopping_patience must be positive or None")
+        if self.scale not in (True, False, "auto"):
+            raise ValueError("scale must be True, False, or 'auto'")
+
+    def _make_cv(self):
+        """Build the CV splitter used for every trial.
+
+        An int ``cv`` becomes a shuffled, ``random_state``-seeded splitter
+        (StratifiedKFold for classification, KFold for regression) so folds are
+        reproducible and not biased by row order. A splitter object passed as
+        ``cv`` is returned unchanged.
+        """
+        if not isinstance(self.cv, int):
+            return self.cv
+        from sklearn.model_selection import StratifiedKFold, KFold
+        if getattr(self, "_estimator_type", None) == "classifier":
+            return StratifiedKFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
+        return KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
+
+    def _should_scale(self):
+        """Whether the current algorithm should be wrapped in a StandardScaler."""
+        if self.scale is True:
+            return True
+        if self.scale is False:
+            return False
+        return self.algorithm in _SCALE_SENSITIVE_ALGORITHMS
+
+    def _wrap_model(self, model, X):
+        """Wrap ``model`` in a StandardScaler->model Pipeline when scaling applies.
+
+        The scaler is a pipeline step, so cross-validation fits it on the training
+        fold only (no leakage). For sparse input, centering is disabled
+        (``with_mean=False``) to preserve sparsity.
+        """
+        if not self._should_scale():
+            return model
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+        from scipy.sparse import issparse
+        scaler = StandardScaler(with_mean=not issparse(X))
+        return Pipeline([("scaler", scaler), ("model", model)])
+
+    def nested_score(self, X, y, outer_cv=5):
+        """Unbiased generalization estimate via nested cross-validation.
+
+        ``best_score_`` is the maximum inner-CV score over all trials and is
+        therefore an optimistic estimate of generalization (the hyperparameters
+        are chosen on the same folds they are scored on). ``nested_score`` instead
+        refits the entire optimizer independently on each outer training fold and
+        scores on the held-out fold, giving an estimate that is not contaminated
+        by the search.
+
+        This is expensive: it runs ``outer_cv`` full optimizations. Does not
+        require the optimizer to be fitted first. Returns the array of per-fold
+        scores; take ``.mean()`` for a point estimate.
+        """
+        stratify = getattr(self, "_estimator_type", None) == "classifier"
+        return _nested_cv_score(self, X, y, self.scoring, outer_cv, self.random_state, stratify)
 
     def _get_optuna_verbosity_level(self):
         """Resolve verbose setting to an Optuna logging level."""
@@ -207,12 +312,17 @@ class OptimizerBase(BaseEstimator):
         scores : array
             Cross-validation scores
         """
+        # Apply feature scaling (inside the pipeline, so it is fit per-fold) and build
+        # the shuffled, seeded CV splitter.
+        model = self._wrap_model(model, X)
+        cv = self._make_cv()
+
         def _run_cv():
             import warnings as _warnings
             with _warnings.catch_warnings():
                 if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
                     _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
-                return cross_val_score(model, X, y, cv=self.cv, scoring=self.scoring, n_jobs=self.n_jobs, error_score="raise")
+                return cross_val_score(model, X, y, cv=cv, scoring=self.scoring, n_jobs=self.n_jobs, error_score="raise")
 
         # ThreadPoolExecutor gives cross-platform timeouts. We deliberately do NOT use a
         # `with` block: its __exit__ calls shutdown(wait=True), which would block until a
@@ -287,6 +397,7 @@ class OptimizerBase(BaseEstimator):
             "random_state": self.random_state,
             "early_stopping_patience": self.early_stopping_patience,
             "n_jobs": self.n_jobs,
+            "scale": self.scale,
         }
 
     def set_params(self, **params):
@@ -615,6 +726,13 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         -------
         self : object
             Fitted estimator
+
+        Notes
+        -----
+        ``best_score_`` is the best inner-CV score found across all trials and is an
+        optimistically biased estimate of generalization (the hyperparameters are
+        selected on the same folds they are scored on). For an unbiased estimate, use
+        ``nested_score(X, y)``.
         """
         # Store feature names before check_X_y converts DataFrame to numpy
         if hasattr(X, "columns"):
@@ -678,8 +796,10 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         self.best_params_ = self.study_.best_params
         self.best_score_ = self.study_.best_value
 
-        # Create and fit the best estimator
+        # Create and fit the best estimator (wrapped in the same scaler used during CV,
+        # so predictions are made on identically-scaled features).
         self._create_best_estimator()
+        self.best_estimator_ = self._wrap_model(self.best_estimator_, X)
         self._fit_best_estimator(X, y)
 
         # Set classes_ for classifiers
@@ -1093,6 +1213,13 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         -------
         self : object
             Fitted estimator
+
+        Notes
+        -----
+        ``best_score_`` is the best inner-CV score found across all trials and is an
+        optimistically biased estimate of generalization (the hyperparameters are
+        selected on the same folds they are scored on). For an unbiased estimate, use
+        ``nested_score(X, y)``.
         """
         # Store feature names before check_X_y converts DataFrame to numpy
         if hasattr(X, "columns"):
@@ -1159,8 +1286,10 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         self.best_params_ = self.study_.best_params
         self.best_score_ = self.study_.best_value
 
-        # Create and fit the best estimator
+        # Create and fit the best estimator (wrapped in the same scaler used during CV,
+        # so predictions are made on identically-scaled features).
         self._create_best_estimator()
+        self.best_estimator_ = self._wrap_model(self.best_estimator_, X)
         self._fit_best_estimator(X, y)
 
         # Set output dimensions
@@ -1277,6 +1406,7 @@ class Optimizer(BaseEstimator):
         random_state=None,
         early_stopping_patience=None,
         n_jobs=1,
+        scale="auto",
     ):
         """
         Initialize the universal optimizer.
@@ -1295,8 +1425,9 @@ class Optimizer(BaseEstimator):
             Number of optimization trials
         timeout : float or None, default=None
             Maximum time for optimization
-        cv : int, default=5
-            Number of CV folds
+        cv : int or cross-validation splitter, default=5
+            Number of CV folds. An int builds a shuffled, seeded splitter; a
+            splitter object is used as-is.
         scoring : str or None, default=None
             Scoring method (defaults to 'accuracy' for classifiers, 'r2' for regressors)
         cv_timeout : float, default=120
@@ -1307,6 +1438,11 @@ class Optimizer(BaseEstimator):
             Patience for early stopping
         n_jobs : int, default=1
             Number of parallel jobs
+        scale : bool or {'auto'}, default='auto'
+            Feature scaling policy. ``'auto'`` wraps only scale-sensitive
+            algorithms (SVM, KNN, MLP, regularized-linear models) in a
+            StandardScaler fit per CV fold; ``True`` always scales, ``False``
+            never scales.
         """
         supported = self._get_supported_algorithms()
         if algorithm not in supported:
@@ -1337,6 +1473,7 @@ class Optimizer(BaseEstimator):
                 random_state=random_state,
                 early_stopping_patience=early_stopping_patience,
                 n_jobs=n_jobs,
+                scale=scale,
             )
             self._estimator_type = "classifier"
         else:
@@ -1353,6 +1490,7 @@ class Optimizer(BaseEstimator):
                 random_state=random_state,
                 early_stopping_patience=early_stopping_patience,
                 n_jobs=n_jobs,
+                scale=scale,
             )
             self._estimator_type = "regressor"
 
@@ -1368,6 +1506,7 @@ class Optimizer(BaseEstimator):
         self.random_state = random_state
         self.early_stopping_patience = early_stopping_patience
         self.n_jobs = n_jobs
+        self.scale = scale
 
     def fit(self, X, y):
         """Fit the optimizer"""
@@ -1412,6 +1551,18 @@ class Optimizer(BaseEstimator):
         """Return the score of the model on the test data"""
         return self._optimizer.score(X, y)
 
+    def nested_score(self, X, y, outer_cv=5):
+        """Unbiased generalization estimate via nested cross-validation.
+
+        ``best_score_`` is optimistically biased because the hyperparameters are
+        chosen on the same folds they are scored on. ``nested_score`` refits the
+        whole optimizer independently on each outer training fold and scores on the
+        held-out fold, so the search never sees the data it is judged on. Runs
+        ``outer_cv`` full optimizations (expensive) and returns the per-fold scores.
+        """
+        stratify = self._estimator_type == "classifier"
+        return _nested_cv_score(self, X, y, self.scoring, outer_cv, self.random_state, stratify)
+
     def get_params(self, deep=True):
         """Get parameters for this estimator"""
         return {
@@ -1427,6 +1578,7 @@ class Optimizer(BaseEstimator):
             "random_state": self.random_state,
             "early_stopping_patience": self.early_stopping_patience,
             "n_jobs": self.n_jobs,
+            "scale": self.scale,
         }
 
     def set_params(self, **params):
@@ -1503,6 +1655,10 @@ class AlgorithmBenchmark:
         the same CV setup but bypasses Optuna entirely.  It is always excluded
         from ``best_algorithm_`` / ``best_estimator_`` selection so it cannot
         "win", but appears in ``results_`` and ``summary()`` for reference.
+    scale : bool or {'auto'}, default 'auto'
+        Feature scaling policy forwarded to every Optimizer.  ``'auto'`` scales
+        only scale-sensitive algorithms, so tree ensembles and scale-invariant
+        models are compared on equal footing with SVM/KNN/MLP/linear models.
     """
 
     def __init__(
@@ -1521,6 +1677,7 @@ class AlgorithmBenchmark:
         n_jobs_algorithms: int = 1,
         verbose: Union[bool, int] = False,
         include_dummy: bool = True,
+        scale: Union[bool, str] = "auto",
     ):
         if task not in ("classification", "regression"):
             raise ValueError("task must be 'classification' or 'regression'")
@@ -1557,6 +1714,7 @@ class AlgorithmBenchmark:
         self.n_jobs_algorithms = n_jobs_algorithms
         self.verbose = verbose
         self.include_dummy = include_dummy
+        self.scale = scale
 
     def _run_dummy(self, X, y):
         """Evaluate the dummy baseline via cross-validation (no Optuna)."""
@@ -1620,6 +1778,7 @@ class AlgorithmBenchmark:
             random_state=self.random_state,
             early_stopping_patience=self.early_stopping_patience,
             n_jobs=self.n_jobs,
+            scale=self.scale,
         )
         t0 = _time.monotonic()
         try:

@@ -1,3 +1,40 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "optuml"
+version = "0.2.7"
+description = "Hyperparameter optimization for multiple machine learning algorithms using Optuna, with Scikit-learn API"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Filip S.", email = "filip.ursynow@gmail.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    # sklearn >= 1.0 is required: HistGradientBoosting* graduated from the
+    # experimental namespace in 1.0 and the code imports it directly. The
+    # ensure_all_finite / force_all_finite and LogisticRegression penalty shims
+    # keep the library working across 1.0 through >= 1.8.
+    "optuna>=3.0.1",
+    "scikit-learn>=1.0",
+    "numpy",
+]
+
+[project.optional-dependencies]
+catboost = ["catboost"]
+xgboost = ["xgboost"]
+lightgbm = ["lightgbm"]
+all = ["catboost", "xgboost", "lightgbm"]
+
+[project.urls]
+Homepage = "https://github.com/filipsPL/optuml"
+
+[tool.setuptools.packages.find]
+include = ["optuml*"]

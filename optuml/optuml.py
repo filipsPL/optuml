@@ -74,6 +74,37 @@ def _make_logistic_regression(**kwargs):
         return LogisticRegression(**kwargs)
 
 
+class _LabelEncodingClassifier(BaseEstimator, ClassifierMixin):
+    """Wrap a classifier so it accepts arbitrary class labels.
+
+    XGBoost's sklearn classifier requires targets encoded as ``0..n_classes-1`` and
+    raises on string or non-contiguous integer labels. This wrapper label-encodes
+    ``y`` on ``fit`` and inverse-transforms predictions, so ``XGBClassifier`` behaves
+    like every other classifier (which accept arbitrary labels). It is a plain
+    ``BaseEstimator`` (single ``estimator`` param), so ``sklearn.clone`` works and it
+    can be used inside ``cross_val_score``. ``decision_function`` is intentionally not
+    defined (XGBoost has none), so ``hasattr(...)`` reports it correctly.
+    """
+
+    def __init__(self, estimator):
+        self.estimator = estimator
+
+    def fit(self, X, y):
+        from sklearn.preprocessing import LabelEncoder
+        self._label_encoder = LabelEncoder().fit(y)
+        self.classes_ = self._label_encoder.classes_
+        self.estimator.fit(X, self._label_encoder.transform(y))
+        return self
+
+    def predict(self, X):
+        check_is_fitted(self, "classes_")
+        return self._label_encoder.inverse_transform(self.estimator.predict(X))
+
+    def predict_proba(self, X):
+        check_is_fitted(self, "classes_")
+        return self.estimator.predict_proba(X)
+
+
 # Algorithms whose performance depends materially on feature scaling (distance-based,
 # gradient-based, or regularized-linear models). Tree ensembles, naive Bayes, QDA and
 # plain OLS are scale-invariant for prediction and are intentionally excluded, so
@@ -137,7 +168,11 @@ class OptimizerBase(BaseEstimator):
         algorithm : str
             Machine learning algorithm to optimize
         direction : str, default='maximize'
-            Optimization direction ('maximize' or 'minimize')
+            Optimization direction ('maximize' or 'minimize'). Keep 'maximize'
+            for all of sklearn's built-in scoring strings — they follow the
+            higher-is-better convention, including the ``neg_*`` error metrics
+            (e.g. 'neg_mean_squared_error'). Only use 'minimize' with a custom
+            lower-is-better objective.
         verbose : bool or int, default=False
             Verbosity level for Optuna logging
         show_progress_bar : bool, default=False
@@ -665,7 +700,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             gamma = trial.suggest_float("gamma", 0, 5)
             reg_alpha = trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True)
             reg_lambda = trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True)
-            model = XGBClassifier(
+            # Wrap in a label encoder: XGBoost requires labels 0..n-1 and errors on
+            # string / non-contiguous integer labels, unlike the other classifiers.
+            model = _LabelEncodingClassifier(XGBClassifier(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
                 learning_rate=learning_rate,
@@ -677,7 +714,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 random_state=self.random_state,
                 eval_metric="logloss",
                 verbosity=0,
-            )
+            ))
 
         elif self.algorithm == "SGDClassifier":
             # loss: default="hinge" (linear SVM). "log_loss" = logistic regression.
@@ -855,7 +892,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         elif self.algorithm == "CatBoostClassifier" and CATBOOST_AVAILABLE:
             self.best_estimator_ = CatBoostClassifier(**params, random_state=self.random_state, verbose=False, allow_writing_files=False)
         elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
-            self.best_estimator_ = XGBClassifier(**params, random_state=self.random_state, eval_metric="logloss", verbosity=0)
+            self.best_estimator_ = _LabelEncodingClassifier(
+                XGBClassifier(**params, random_state=self.random_state, eval_metric="logloss", verbosity=0)
+            )
         elif self.algorithm == "LGBMClassifier" and LIGHTGBM_AVAILABLE:
             self.best_estimator_ = LGBMClassifier(**params, random_state=self.random_state, verbosity=-1)
         elif self.algorithm == "SGDClassifier":
@@ -900,7 +939,13 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         return self.best_estimator_.decision_function(X)
 
     def score(self, X, y):
-        """Return the mean accuracy on the given test data and labels"""
+        """Return the mean accuracy on the given test data and labels.
+
+        Note: like any sklearn classifier, ``score`` always returns accuracy,
+        regardless of the ``scoring`` metric used to *optimize* hyperparameters.
+        To evaluate with a different metric, use ``sklearn.metrics`` on
+        ``predict``/``predict_proba`` output.
+        """
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
         X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True)
         if LIGHTGBM_AVAILABLE and self.algorithm == "LGBMClassifier":
@@ -1363,7 +1408,13 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         return self.best_estimator_.predict(X)
 
     def score(self, X, y):
-        """Return the coefficient of determination R^2 of the prediction"""
+        """Return the coefficient of determination R^2 of the prediction.
+
+        Note: like any sklearn regressor, ``score`` always returns R^2,
+        regardless of the ``scoring`` metric used to *optimize* hyperparameters.
+        To evaluate with a different metric, use ``sklearn.metrics`` on
+        ``predict`` output.
+        """
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
         X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True, y_numeric=True)
         if LIGHTGBM_AVAILABLE and self.algorithm == "LGBMRegressor":
@@ -1416,7 +1467,11 @@ class Optimizer(BaseEstimator):
         algorithm : str, default='SVC'
             Machine learning algorithm to optimize
         direction : str, default='maximize'
-            Optimization direction ('maximize' or 'minimize')
+            Optimization direction ('maximize' or 'minimize'). Keep 'maximize'
+            for all of sklearn's built-in scoring strings — they follow the
+            higher-is-better convention, including the ``neg_*`` error metrics
+            (e.g. 'neg_mean_squared_error'). Only use 'minimize' with a custom
+            lower-is-better objective.
         verbose : bool or int, default=False
             Verbosity level
         show_progress_bar : bool, default=False

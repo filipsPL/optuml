@@ -764,3 +764,35 @@ def test_nested_score_does_not_require_fit(regression_data):
     assert len(scores) == 3
     # optimizer itself remains unfitted
     assert not hasattr(opt, "best_estimator_")
+
+
+# ---------------------------------------------------------------------------
+# XGBoost arbitrary-label support (#7)
+# ---------------------------------------------------------------------------
+
+def test_xgb_accepts_string_labels(classification_data):
+    """XGBClassifier must handle arbitrary (string) labels like other classifiers."""
+    pytest.importorskip("xgboost")
+    X_train, X_test, y_train, y_test = classification_data
+    y_train_str = np.array(["setosa", "versicolor", "virginica"])[y_train]
+    opt = Optimizer(algorithm="XGBClassifier", n_trials=3, random_state=0)
+    opt.fit(X_train, y_train_str)
+    preds = opt.predict(X_test)
+    # predictions are returned in the original label space
+    assert set(np.unique(preds)).issubset({"setosa", "versicolor", "virginica"})
+    assert set(opt.classes_) == {"setosa", "versicolor", "virginica"}
+    proba = opt.predict_proba(X_test)
+    assert proba.shape == (len(X_test), 3)
+    assert np.allclose(proba.sum(axis=1), 1)
+
+
+def test_xgb_accepts_noncontiguous_int_labels(classification_data):
+    """XGBClassifier must handle non-contiguous integer labels (e.g. {1,2,3})."""
+    pytest.importorskip("xgboost")
+    X_train, X_test, y_train, y_test = classification_data
+    opt = Optimizer(algorithm="XGBClassifier", n_trials=3, random_state=0)
+    opt.fit(X_train, y_train + 1)  # labels {1,2,3}
+    preds = opt.predict(X_test)
+    assert set(np.unique(preds)).issubset({1, 2, 3})
+    score = opt.score(X_test, y_test + 1)
+    assert 0 <= score <= 1

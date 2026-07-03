@@ -161,6 +161,20 @@ class OptimizerBase(BaseEstimator):
             return self.verbose
         return optuna.logging.WARNING
 
+    @staticmethod
+    def _resolve_svm_gamma(params):
+        """Convert the two-step gamma encoding back into a single SVC/SVR ``gamma`` arg.
+
+        The objective suggests a categorical ``gamma`` in {"scale", "auto", "value"} so the
+        sklearn defaults ("scale"/"auto") stay reachable; when "value" is chosen a numeric
+        ``gamma_value`` is suggested. Here we collapse that pair into the single ``gamma``
+        keyword sklearn expects. Mutates and returns ``params``.
+        """
+        gamma_value = params.pop("gamma_value", None)
+        if params.get("gamma") == "value":
+            params["gamma"] = gamma_value
+        return params
+
     def _fit_best_estimator(self, X, y):
         """Fit best_estimator_ on full data, suppressing known LightGBM/sklearn warnings."""
         if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
@@ -200,20 +214,27 @@ class OptimizerBase(BaseEstimator):
                     _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
                 return cross_val_score(model, X, y, cv=self.cv, scoring=self.scoring, n_jobs=self.n_jobs, error_score="raise")
 
-        # Use ThreadPoolExecutor for timeout (works on all platforms)
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        # ThreadPoolExecutor gives cross-platform timeouts. We deliberately do NOT use a
+        # `with` block: its __exit__ calls shutdown(wait=True), which would block until a
+        # slow CV finished and defeat the timeout. Instead we shut down with wait=False so
+        # control returns to the caller the moment cv_timeout fires. A timed-out worker
+        # thread keeps running in the background (Python threads cannot be killed) but no
+        # longer holds up the optimization.
+        executor = ThreadPoolExecutor(max_workers=1)
+        try:
             future = executor.submit(_run_cv)
-            try:
-                scores = future.result(timeout=self.cv_timeout)
-                return scores
-            except FutureTimeoutError:
-                if self.verbose:
-                    print(f"Cross-validation timed out after {self.cv_timeout} seconds.")
-                raise optuna.TrialPruned(f"CV timed out after {self.cv_timeout}s")
-            except Exception as e:
-                if self.verbose:
-                    print(f"Cross-validation failed: {type(e).__name__}: {e}")
-                raise optuna.TrialPruned(f"CV failed: {type(e).__name__}: {e}")
+            scores = future.result(timeout=self.cv_timeout)
+            return scores
+        except FutureTimeoutError:
+            if self.verbose:
+                print(f"Cross-validation timed out after {self.cv_timeout} seconds.")
+            raise optuna.TrialPruned(f"CV timed out after {self.cv_timeout}s")
+        except Exception as e:
+            if self.verbose:
+                print(f"Cross-validation failed: {type(e).__name__}: {e}")
+            raise optuna.TrialPruned(f"CV failed: {type(e).__name__}: {e}")
+        finally:
+            executor.shutdown(wait=False)
 
     def _get_early_stopping_callback(self):
         """Create early stopping callback for Optuna"""
@@ -333,7 +354,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             C = trial.suggest_float("C", 1e-2, 1e2, log=True)
             kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
             if kernel != "linear":
-                gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
+                # Keep the sklearn defaults ("scale"/"auto") reachable, plus a tunable float.
+                gamma_mode = trial.suggest_categorical("gamma", ["scale", "auto", "value"])
+                gamma = trial.suggest_float("gamma_value", 1e-4, 1e1, log=True) if gamma_mode == "value" else gamma_mode
                 model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=True)
             else:
                 model = SVC(C=C, kernel=kernel, random_state=self.random_state, probability=True)
@@ -635,10 +658,16 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             optuna.logging.set_verbosity(_prev_verbosity)
 
         self.study_time_ = time.time() - start_time
-        self.n_trials_completed_ = len(self.study_.trials)
+        # Count only COMPLETE trials. Pruned/failed trials must not count here: the
+        # attribute is named *completed*, and `study_.best_trial` raises ValueError
+        # (rather than returning None) when no trial completed, so we must gate on this
+        # before touching best_trial / best_params below.
+        self.n_trials_completed_ = len(
+            self.study_.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+        )
 
         # Check if any trials succeeded
-        if self.n_trials_completed_ == 0 or self.study_.best_trial is None:
+        if self.n_trials_completed_ == 0:
             raise RuntimeError(
                 "Optimization failed: No successful trials completed. "
                 "Check pruned trial messages via study_.trials for the root cause "
@@ -665,6 +694,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         params = self.best_params_.copy()
 
         if self.algorithm == "SVC":
+            params = self._resolve_svm_gamma(params)
             self.best_estimator_ = SVC(**params, random_state=self.random_state, probability=True)
         elif self.algorithm == "KNeighborsClassifier":
             self.best_estimator_ = KNeighborsClassifier(**params)
@@ -816,7 +846,9 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             epsilon = trial.suggest_float("epsilon", 1e-4, 1.0, log=True)
             kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "sigmoid"])
             if kernel != "linear":
-                gamma = trial.suggest_float("gamma", 1e-4, 1e1, log=True)
+                # Keep the sklearn defaults ("scale"/"auto") reachable, plus a tunable float.
+                gamma_mode = trial.suggest_categorical("gamma", ["scale", "auto", "value"])
+                gamma = trial.suggest_float("gamma_value", 1e-4, 1e1, log=True) if gamma_mode == "value" else gamma_mode
                 model = SVR(C=C, epsilon=epsilon, gamma=gamma, kernel=kernel)
             else:
                 model = SVR(C=C, epsilon=epsilon, kernel=kernel)
@@ -1107,10 +1139,16 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             optuna.logging.set_verbosity(_prev_verbosity)
 
         self.study_time_ = time.time() - start_time
-        self.n_trials_completed_ = len(self.study_.trials)
+        # Count only COMPLETE trials. Pruned/failed trials must not count here: the
+        # attribute is named *completed*, and `study_.best_trial` raises ValueError
+        # (rather than returning None) when no trial completed, so we must gate on this
+        # before touching best_trial / best_params below.
+        self.n_trials_completed_ = len(
+            self.study_.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+        )
 
         # Check if any trials succeeded
-        if self.n_trials_completed_ == 0 or self.study_.best_trial is None:
+        if self.n_trials_completed_ == 0:
             raise RuntimeError(
                 "Optimization failed: No successful trials completed. "
                 "Check pruned trial messages via study_.trials for the root cause "
@@ -1135,6 +1173,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         params = self.best_params_.copy()
 
         if self.algorithm == "SVR":
+            params = self._resolve_svm_gamma(params)
             self.best_estimator_ = SVR(**params)
         elif self.algorithm == "KNeighborsRegressor":
             self.best_estimator_ = KNeighborsRegressor(**params)

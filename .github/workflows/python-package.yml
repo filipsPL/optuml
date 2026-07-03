@@ -32,7 +32,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pytest optuna scikit-learn catboost xgboost numpy wrapt_timeout_decorator
+        pip install pytest optuna scikit-learn catboost xgboost lightgbm numpy
 
     - name: Run tests
       run: |

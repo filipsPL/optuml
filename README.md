@@ -41,6 +41,8 @@ print(y_pred[:10])
 
 *I want to make a fair comparison of ML methods, where 'fair' means that each method has tuned hyperparameters, making it the best version of itself.*
 
+Two design choices support that fairness: scale-sensitive algorithms (SVM, KNN, MLP, regularized-linear models) are automatically standardized so they are not handicapped against scale-invariant trees (see [Feature Scaling](#feature-scaling)), and [`nested_score()`](#unbiased-evaluation-nested-cross-validation) provides an *unbiased* generalization estimate for reporting, since `best_score_` is optimistically biased by the hyperparameter search.
+
 
 ## Key Features
 
@@ -242,6 +244,38 @@ optimizer = Optimizer(
 )
 ```
 
+### Feature Scaling
+
+Many algorithms (SVM, KNN, MLP, and regularized-linear models) perform poorly on unscaled features, while trees are scale-invariant. The `scale` parameter controls standardization so every algorithm competes on equal footing:
+
+```python
+# scale="auto" (default): standardize only scale-sensitive algorithms
+optimizer = Optimizer(algorithm="SVC", n_trials=50)          # SVC gets a StandardScaler
+optimizer = Optimizer(algorithm="RandomForestClassifier")    # trees are left as-is
+
+# Force or disable scaling explicitly
+Optimizer(algorithm="SVC", scale=True)    # always standardize
+Optimizer(algorithm="SVC", scale=False)   # never standardize
+```
+
+The scaler is fit **inside each cross-validation fold** (and on the final training data), so no information leaks from validation folds. When scaling applies, `best_estimator_` is a `Pipeline([("scaler", StandardScaler()), ("model", ...)])`. Sparse input keeps its sparsity (`with_mean=False`).
+
+### Unbiased Evaluation (Nested Cross-Validation)
+
+`best_score_` is the best score found *during* the search and is therefore an optimistic estimate of generalization. For an unbiased number to report, use `nested_score()`, which runs a full, independent optimization on each outer fold:
+
+```python
+optimizer = Optimizer(algorithm="SVC", n_trials=50, random_state=42)
+
+scores = optimizer.nested_score(X, y, outer_cv=5)   # one full optimization per fold
+print(f"Unbiased estimate: {scores.mean():.3f} +/- {scores.std():.3f}")
+
+optimizer.fit(X, y)
+print(f"Optimistic best_score_: {optimizer.best_score_:.3f}")  # typically higher
+```
+
+It does not require `fit()` to have been called (it refits internally). Reproducible folds come from `random_state`; cross-validation always uses a shuffled, seeded `StratifiedKFold`/`KFold`, and you may also pass a splitter object as `cv`.
+
 ### Timeout Protection
 
 Set time limits for optimization:
@@ -249,9 +283,9 @@ Set time limits for optimization:
 ```python
 optimizer = Optimizer(
     algorithm="MLPClassifier",
-    timeout=300,  # Total optimization timeout (5 minutes)
-    cv_timeout=30,  # Per-trial timeout (30 seconds)
-    n_trials=1000  # Will stop at timeout even if trials remain
+    timeout=300,  # Total study timeout: stops launching trials after 5 minutes
+    cv_timeout=30,  # Per-trial timeout: prunes any trial whose CV exceeds 30 seconds
+    n_trials=1000  # Upper bound on trials; timeout will usually cut this short
 )
 ```
 
@@ -372,6 +406,8 @@ bench = AlgorithmBenchmark(
 | `n_jobs`                  | int            | 1            | Parallel CV jobs inside each `Optimizer`            |
 | `n_jobs_algorithms`       | int            | 1            | Algorithms to run in parallel (`-1` = all cores)    |
 | `verbose`                 | bool/int       | False        | Verbosity forwarded to each `Optimizer`             |
+| `include_dummy`           | bool           | True         | Add a dummy baseline (never wins) for reference     |
+| `scale`                   | bool or "auto" | "auto"       | Scaling policy forwarded to every `Optimizer`       |
 
 *Auto defaults: `"accuracy"` for classification, `"r2"` for regression
 
@@ -427,20 +463,23 @@ Specialized optimizer for regression algorithms with appropriate default scoring
 
 | Parameter                 | Type       | Default    | Description                                |
 | ------------------------- | ---------- | ---------- | ------------------------------------------ |
-| `algorithm`               | str        | required   | ML algorithm to optimize                   |
-| `n_trials`                | int        | 100        | Number of optimization trials              |
-| `cv`                      | int        | 5          | Cross-validation folds                     |
-| `scoring`                 | str/None   | Auto*      | Scoring metric for CV                      |
-| `direction`               | str        | "maximize" | Optimization direction                     |
-| `timeout`                 | float/None | None       | Total optimization timeout (seconds)       |
-| `cv_timeout`              | float      | 120        | Single CV evaluation timeout               |
-| `random_state`            | int/None   | None       | Random seed for reproducibility            |
-| `n_jobs`                  | int        | 1          | Parallel jobs for CV (-1 for all cores)    |
-| `early_stopping_patience` | int/None   | None       | Trials without improvement before stopping |
-| `verbose`                 | bool/int   | False      | Verbosity level                            |
-| `show_progress_bar`       | bool       | False      | Show optimization progress                 |
+| `algorithm`               | str            | required   | ML algorithm to optimize                          |
+| `n_trials`                | int            | 100        | Number of optimization trials                     |
+| `cv`                      | int or splitter| 5          | CV folds (shuffled, seeded) or a splitter object  |
+| `scoring`                 | str/None       | Auto*      | Scoring metric for CV                             |
+| `scale`                   | bool or "auto" | "auto"     | Standardize scale-sensitive algorithms**          |
+| `direction`               | str            | "maximize" | Optimization direction (keep "maximize"***)       |
+| `timeout`                 | float/None     | None       | Total optimization timeout (seconds)              |
+| `cv_timeout`              | float          | 120        | Single CV evaluation timeout                      |
+| `random_state`            | int/None       | None       | Random seed for reproducibility                   |
+| `n_jobs`                  | int            | 1          | Parallel jobs for CV (-1 for all cores)           |
+| `early_stopping_patience` | int/None       | None       | Trials without improvement before stopping        |
+| `verbose`                 | bool/int       | False      | Verbosity level                                   |
+| `show_progress_bar`       | bool           | False      | Show optimization progress                        |
 
 *Auto defaults: "accuracy" for classifiers, "r2" for regressors
+**`"auto"` scales only scale-sensitive algorithms (SVM, KNN, MLP, regularized-linear); `True`/`False` force/disable. See [Feature Scaling](#feature-scaling).
+***All sklearn scoring strings are higher-is-better (including `neg_*`); only use `"minimize"` with a custom lower-is-better objective.
 
 ### Methods
 
@@ -448,11 +487,14 @@ Specialized optimizer for regression algorithms with appropriate default scoring
 | ---------------------- | ---------------------------------- | ---------------- |
 | `fit(X, y)`            | Optimize hyperparameters and train | All              |
 | `predict(X)`           | Make predictions                   | All              |
-| `score(X, y)`          | Evaluate model performance         | All              |
+| `score(X, y)`          | Evaluate model (accuracy / R²)†    | All              |
+| `nested_score(X, y)`   | Unbiased estimate via nested CV    | All              |
 | `predict_proba(X)`     | Predict class probabilities        | Classifiers      |
 | `decision_function(X)` | Get decision values                | Some classifiers |
 | `get_params()`         | Get optimizer parameters           | All              |
 | `set_params(**params)` | Set optimizer parameters           | All              |
+
+†`score()` always returns accuracy (classifiers) or R² (regressors), regardless of the `scoring` used to optimize — standard scikit-learn behavior. Use `sklearn.metrics` on `predict`/`predict_proba` for other metrics.
 
 ### Attributes (after fitting)
 

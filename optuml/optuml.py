@@ -1774,7 +1774,7 @@ class AlgorithmBenchmark:
     def _run_dummy(self, X, y):
         """Evaluate the dummy baseline via cross-validation (no Optuna)."""
         import time as _time
-        from sklearn.model_selection import cross_val_score
+        from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
 
         if self.task == "classification":
             from sklearn.dummy import DummyClassifier
@@ -1786,10 +1786,18 @@ class AlgorithmBenchmark:
             dummy = DummyRegressor(strategy="mean")
             label = "DummyRegressor(mean)"
 
+        # Use the same shuffled, seeded splitter the Optimizers use, so the dummy is
+        # scored on identical folds. A splitter object passed as cv is used as-is.
+        if isinstance(self.cv, int):
+            splitter_cls = StratifiedKFold if self.task == "classification" else KFold
+            cv = splitter_cls(n_splits=self.cv, shuffle=True, random_state=self.random_state)
+        else:
+            cv = self.cv
+
         scoring = self.scoring or ("accuracy" if self.task == "classification" else "r2")
         t0 = _time.monotonic()
         try:
-            scores = cross_val_score(dummy, X, y, cv=self.cv, scoring=scoring,
+            scores = cross_val_score(dummy, X, y, cv=cv, scoring=scoring,
                                      n_jobs=self.n_jobs)
             dummy.fit(X, y)
             elapsed = _time.monotonic() - t0

@@ -65,11 +65,13 @@ pip install optuml
 With optional algorithm support:
 
 ```bash
-pip install optuml[all]          # CatBoost + XGBoost + LightGBM + fuzzy-rough-learn
+pip install optuml[all]          # CatBoost + XGBoost + LightGBM + fuzzy-rough-learn + interpret + imodels
 pip install optuml[catboost]     # CatBoost only
 pip install optuml[xgboost]      # XGBoost only
 pip install optuml[lightgbm]     # LightGBM only
 pip install optuml[frlearn]      # fuzzy-rough-learn only (FRNN / FROVOCO)
+pip install optuml[interpret]    # InterpretML (Explainable Boosting Machine)
+pip install optuml[imodels]      # imodels (RuleFit / FIGS)
 ```
 
 or upgrade:
@@ -85,7 +87,7 @@ pip install optuml --upgrade
 pip install optuna scikit-learn numpy
 
 # Optional: Install additional algorithms
-pip install catboost xgboost fuzzy-rough-learn
+pip install catboost xgboost fuzzy-rough-learn interpret-core imodels
 
 # Download the module
 wget https://raw.githubusercontent.com/filipsPL/optuml/main/optuml/optuml.py
@@ -178,11 +180,17 @@ print(f"R² Score: {r2:.3f}")
 | `DecisionTreeClassifier`         | Decision Tree                   | Multiple criteria, pruning                |
 | `SGDClassifier`                  | Stochastic Gradient Descent     | Multiple losses, L1/L2/ElasticNet, online |
 | `RoughSetClassifier`             | Rough Sets (Pawlak)             | Reducts + readable if-then rules          |
+| `LDA`                            | Linear Discriminant Analysis    | Linear boundaries, optional shrinkage     |
+| `GaussianProcessClassifier`      | Gaussian Process                | RBF/Matern/RQ kernels, probabilistic (small data) |
+| `LinearSVC`                      | Linear SVM                      | Scales to many samples, hinge/L1 options  |
 | `CatBoostClassifier`*            | CatBoost                        | Categorical features, GPU support         |
 | `XGBClassifier`*                 | XGBoost                         | Regularization, missing values            |
 | `LGBMClassifier`*                | LightGBM                        | Fast GBDT, leaf-wise growth               |
 | `FRNNClassifier`*                | Fuzzy Rough Nearest Neighbour   | OWA-weighted fuzzy-rough k-NN             |
 | `FROVOCOClassifier`*             | Fuzzy Rough OVO Combination     | Imbalanced multiclass (one-vs-one)        |
+| `ExplainableBoostingClassifier`* | Explainable Boosting Machine    | Glass-box GAM, per-feature curves, native NaN |
+| `RuleFitClassifier`*             | RuleFit                         | Sparse linear model over tree-derived rules |
+| `FIGSClassifier`*                | FIGS                            | Fast Interpretable Greedy-tree Sums       |
 
 ### Regression Algorithms
 
@@ -202,10 +210,19 @@ print(f"R² Score: {r2:.3f}")
 | `MLPRegressor`                  | Neural Network              | Non-linear patterns                      |
 | `DecisionTreeRegressor`         | Decision Tree               | Non-parametric                           |
 | `SGDRegressor`                  | Stochastic Gradient Descent | Multiple losses, L1/L2/ElasticNet, online |
+| `GaussianProcessRegressor`      | Gaussian Process            | RBF/Matern/RQ kernels, smooth fits (small data) |
+| `KernelRidge`                   | Kernel Ridge                | Linear/RBF/poly/laplacian/sigmoid kernels |
+| `PLSRegression`                 | Partial Least Squares       | Many correlated features, latent components |
+| `BayesianRidge`                 | Bayesian Ridge              | Automatic regularization, small data      |
+| `HuberRegressor`                | Huber Regression            | Robust to outliers                        |
+| `LinearSVR`                     | Linear SVR                  | Epsilon-insensitive loss, scales to many samples |
 | `CatBoostRegressor`*            | CatBoost                    | Handles categoricals                     |
 | `XGBRegressor`*                 | XGBoost                     | High performance                         |
 | `LGBMRegressor`*                | LightGBM                    | Fast GBDT, leaf-wise growth              |
 | `FRNNRegressor`*                | Fuzzy-rough k-NN            | Fuzzy-rough local regression             |
+| `ExplainableBoostingRegressor`* | Explainable Boosting Machine | Glass-box GAM, per-feature curves, native NaN |
+| `RuleFitRegressor`*             | RuleFit                     | Sparse linear model over tree-derived rules |
+| `FIGSRegressor`*                | FIGS                        | Fast Interpretable Greedy-tree Sums      |
 
 *Optional dependencies (install separately)
 
@@ -246,6 +263,34 @@ for rule in rs.describe_rules(feature_names=names, max_rules=5):
 ```
 
 Its value is interpretability (explicit rules and the selected attributes), not raw accuracy: discretisation loses information, so on continuous data it usually scores below the fuzzy-rough and tree models. Fuzzy-rough methods (`FRNNClassifier`, `FROVOCOClassifier` above) generalise the same lower/upper-approximation idea to graded similarity, which avoids discretisation; Pawlak's model is their special case with all-or-nothing similarity.
+
+### Interpretable Models (EBM, RuleFit, FIGS)
+
+Three optional glass-box model families are available. They are listed only when their package is installed (`pip install optuml[interpret]` for EBM, `pip install optuml[imodels]` for RuleFit and FIGS).
+
+- **`ExplainableBoostingClassifier` / `ExplainableBoostingRegressor`** ([InterpretML](https://interpret.ml/), package `interpret-core`): a glass-box generalized additive model (GAM) trained by cyclic boosting; every feature's effect is a single plottable curve.
+- **`RuleFitClassifier` / `RuleFitRegressor`** ([imodels](https://github.com/csinva/imodels)): a sparse linear model (Lasso) over rules extracted from tree ensembles plus, optionally, the original linear terms.
+- **`FIGSClassifier` / `FIGSRegressor`** (imodels): Fast Interpretable Greedy-tree Sums, a small sum of greedily grown trees.
+
+```python
+opt = Optimizer(algorithm="FIGSClassifier", n_trials=50).fit(X, y)
+print(opt.best_estimator_)   # a readable sum of trees
+```
+
+Search spaces:
+
+| Model   | Tuned parameters |
+| ------- | ---------------- |
+| EBM     | `learning_rate` 1e-3..0.2 (log), `max_bins` 32..1024 (log), `max_leaves` 2..4, `min_samples_leaf` 2..20 |
+| RuleFit | `n_estimators` 50..200, `tree_size` 2..8, `max_rules` 10..60, `include_linear` |
+| FIGS    | `max_rules` 2..40, `min_impurity_decrease` 0..0.05, `max_trees` and `max_depth` (`None` reachable via sentinels) |
+
+Caveats:
+
+- **EBMs are main-effects-only.** OptuML trains EBMs with `interactions=0`, `outer_bags=4` and `n_jobs=1`. Pairwise-interaction detection made each CV fit 10-50x slower (over 4 minutes per 5-fold CV on breast cancer with library defaults), so EBM's default `"3x"` interactions are intentionally not searched.
+- **NaN:** only EBM accepts `NaN` in `X`; RuleFit and FIGS reject it.
+- **Multiclass RuleFit:** imodels' RuleFit is binary-only, so OptuML wraps `RuleFitClassifier` in a `OneVsRestClassifier` (one rule set per class, in `best_estimator_.estimators_`). With two classes this is a single RuleFit model.
+- **RuleFit is slow-ish.** Each fit takes about 1-4 s because of its inner Lasso path, so 50+ trials take minutes.
 
 ## Advanced Features
 
@@ -303,9 +348,9 @@ Optimizer(algorithm="SVC", scale=False)   # never standardize
 
 The scaler is fit **inside each cross-validation fold** (and on the final training data), so no information leaks from validation folds. When scaling applies, `best_estimator_` is a `Pipeline([("scaler", StandardScaler()), ("model", ...)])`. Sparse input keeps its sparsity (`with_mean=False`).
 
-For `SVR`, `MLPRegressor` and `SGDRegressor` the target is standardized as well (the model is wrapped in a `TransformedTargetRegressor`, so `best_estimator_.named_steps["model"]` is that wrapper and predictions are returned on the original scale). Their `epsilon`/`C`/learning-rate ranges assume a unit-scale target.
+For `SVR`, `LinearSVR`, `MLPRegressor` and `SGDRegressor` the target is standardized as well (the model is wrapped in a `TransformedTargetRegressor`, so `best_estimator_.named_steps["model"]` is that wrapper and predictions are returned on the original scale). Their `epsilon`/`C`/learning-rate ranges assume a unit-scale target.
 
-Missing values: `HistGradientBoosting*`, `XGB*`, `LGBM*` and `CatBoost*` accept `NaN` in `X` (they handle it natively); all other algorithms still reject it.
+Missing values: `HistGradientBoosting*`, `XGB*`, `LGBM*`, `CatBoost*` and `ExplainableBoosting*` accept `NaN` in `X` (they handle it natively); all other algorithms still reject it.
 
 ### Unbiased Evaluation (Nested Cross-Validation)
 
@@ -565,12 +610,12 @@ Specialized optimizer for regression algorithms with appropriate default scoring
 optimizer = Optimizer(algorithm="SVC", cv_timeout=300, cv=3)
 ```
 
-### Issue: CatBoost/XGBoost/LightGBM/fuzzy-rough-learn not available
+### Issue: CatBoost/XGBoost/LightGBM/fuzzy-rough-learn/interpret/imodels not available
 **Solution**: Install optional dependencies:
 ```bash
 pip install optuml[all]
 # or individually:
-pip install catboost xgboost lightgbm fuzzy-rough-learn
+pip install catboost xgboost lightgbm fuzzy-rough-learn interpret-core imodels
 ```
 
 ### Issue: Optimization takes too long

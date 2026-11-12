@@ -8,6 +8,7 @@ from sklearn.datasets import load_iris, load_diabetes
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, r2_score
 from optuml import Optimizer
+from optuml.optuml import ClassifierOptimizer, RegressorOptimizer
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -16,25 +17,11 @@ warnings.filterwarnings('ignore')
 # from optimizer_module import Optimizer  # Uncomment this line if Optimizer is in a separate module
 
 # List of classifiers and regressors
-_supported = set(Optimizer._get_supported_algorithms())
+classifiers = ClassifierOptimizer._get_supported_algorithms()
+regressors = RegressorOptimizer._get_supported_algorithms()
 
-print("Supported Algorithms:", _supported)
-
-classifiers = [a for a in [
-    "SVC", "KNeighborsClassifier", "RandomForestClassifier",
-    "ExtraTreesClassifier", "AdaBoostClassifier", "GradientBoostingClassifier",
-    "HistGradientBoostingClassifier", "MLPClassifier", "GaussianNB",
-    "QDA", "LogisticRegression", "RidgeClassifier", "DecisionTreeClassifier",
-    "SGDClassifier", "CatBoostClassifier", "XGBClassifier", "LGBMClassifier",
-] if a in _supported]
-
-regressors = [a for a in [
-    "SVR", "KNeighborsRegressor", "RandomForestRegressor",
-    "ExtraTreesRegressor", "AdaBoostRegressor", "GradientBoostingRegressor",
-    "HistGradientBoostingRegressor", "MLPRegressor", "LinearRegression",
-    "Ridge", "Lasso", "ElasticNet", "DecisionTreeRegressor",
-    "SGDRegressor", "CatBoostRegressor", "XGBRegressor", "LGBMRegressor",
-] if a in _supported]
+print("Classifiers:", classifiers)
+print("Regressors:", regressors)
 
 # Load datasets
 iris = load_iris()

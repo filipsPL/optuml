@@ -16,10 +16,10 @@ import warnings
 import numpy as np
 import optuna
 from sklearn.datasets import load_iris, load_wine, load_diabetes, load_breast_cancer
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
 
 # Default-parameter estimator classes
-from sklearn.svm import SVC, SVR
+from sklearn.svm import SVC, SVR, LinearSVC, LinearSVR
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.ensemble import (
     RandomForestClassifier,
@@ -33,32 +33,47 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     HistGradientBoostingRegressor,
 )
-from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, RidgeClassifier, Lasso, ElasticNet, SGDClassifier, SGDRegressor
+from sklearn.linear_model import (
+    LogisticRegression, LinearRegression, Ridge, RidgeClassifier, Lasso, ElasticNet,
+    SGDClassifier, SGDRegressor, BayesianRidge, HuberRegressor,
+)
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis as QDA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
+from sklearn.gaussian_process import GaussianProcessClassifier, GaussianProcessRegressor
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.cross_decomposition import PLSRegression
 
-# Optional dependencies
+# Optional dependencies (only imported when the package is installed; optuml's own
+# *_AVAILABLE flags decide which algorithms are supported, so mirror them here).
 try:
     from catboost import CatBoostClassifier, CatBoostRegressor
-    CATBOOST_AVAILABLE = True
 except ImportError:
-    CATBOOST_AVAILABLE = False
+    pass
 
 try:
     from xgboost import XGBClassifier, XGBRegressor
-    XGBOOST_AVAILABLE = True
 except ImportError:
-    XGBOOST_AVAILABLE = False
+    pass
 
 try:
     from lightgbm import LGBMClassifier, LGBMRegressor
-    LIGHTGBM_AVAILABLE = True
 except ImportError:
-    LIGHTGBM_AVAILABLE = False
+    pass
 
 from optuml import Optimizer
+from optuml.optuml import (
+    ClassifierOptimizer,
+    RegressorOptimizer,
+    RoughSetClassifier,
+    FRNNClassifier,
+    FROVOCOClassifier,
+    FRNNRegressor,
+    _make_ebm,
+    _make_imodels,
+)
 
 # Suppress noisy warnings
 warnings.filterwarnings("ignore")
@@ -85,66 +100,109 @@ REGRESSION_DATASETS = {
     "Diabetes": load_diabetes,
 }
 
-CLASSIFIERS = {
-    "SVC": SVC,
-    "KNeighborsClassifier": KNeighborsClassifier,
-    "RandomForestClassifier": RandomForestClassifier,
-    "ExtraTreesClassifier": ExtraTreesClassifier,
-    "AdaBoostClassifier": AdaBoostClassifier,
-    "GradientBoostingClassifier": GradientBoostingClassifier,
-    "HistGradientBoostingClassifier": HistGradientBoostingClassifier,
-    "LogisticRegression": lambda **kw: LogisticRegression(max_iter=1000, **kw),
-    "RidgeClassifier": RidgeClassifier,
-    "DecisionTreeClassifier": DecisionTreeClassifier,
-    "GaussianNB": GaussianNB,
-    "QDA": QDA,
-    "MLPClassifier": lambda **kw: MLPClassifier(max_iter=1000, **kw),
-    "SGDClassifier": lambda **kw: SGDClassifier(max_iter=1000, **kw),
+# The benchmarked algorithms are whatever OptuML supports in this environment
+# (optional packages appear only when installed), so new algorithms are picked up
+# automatically.
+CLASSIFIER_NAMES = list(ClassifierOptimizer._get_supported_algorithms())
+REGRESSOR_NAMES = list(RegressorOptimizer._get_supported_algorithms())
+
+# name -> factory(random_state) building the *default-hyperparameter* estimator:
+# library defaults plus the same fixed, non-tuned settings OptuML uses (iteration
+# caps, verbosity off, EBM's _EBM_FIXED, ...), so only the tuned values differ.
+DEFAULT_FACTORIES = {
+    # --- classifiers ---
+    "SVC": lambda rs: SVC(),
+    "KNeighborsClassifier": lambda rs: KNeighborsClassifier(),
+    "RandomForestClassifier": lambda rs: RandomForestClassifier(random_state=rs),
+    "ExtraTreesClassifier": lambda rs: ExtraTreesClassifier(random_state=rs),
+    "AdaBoostClassifier": lambda rs: AdaBoostClassifier(random_state=rs),
+    "GradientBoostingClassifier": lambda rs: GradientBoostingClassifier(random_state=rs),
+    "HistGradientBoostingClassifier": lambda rs: HistGradientBoostingClassifier(random_state=rs),
+    "MLPClassifier": lambda rs: MLPClassifier(max_iter=1000, early_stopping=True, random_state=rs),
+    "GaussianNB": lambda rs: GaussianNB(),
+    "QDA": lambda rs: QDA(),
+    "LDA": lambda rs: LDA(),
+    "GaussianProcessClassifier": lambda rs: GaussianProcessClassifier(random_state=rs),
+    "LinearSVC": lambda rs: LinearSVC(max_iter=5000, random_state=rs),
+    "LogisticRegression": lambda rs: LogisticRegression(max_iter=1000, random_state=rs),
+    "RidgeClassifier": lambda rs: RidgeClassifier(),
+    "DecisionTreeClassifier": lambda rs: DecisionTreeClassifier(random_state=rs),
+    "SGDClassifier": lambda rs: SGDClassifier(max_iter=1000, tol=1e-3, random_state=rs),
+    "RoughSetClassifier": lambda rs: RoughSetClassifier(),
+    "CatBoostClassifier": lambda rs: CatBoostClassifier(verbose=False, allow_writing_files=False, random_state=rs),
+    "XGBClassifier": lambda rs: XGBClassifier(eval_metric="logloss", verbosity=0, random_state=rs),
+    "LGBMClassifier": lambda rs: LGBMClassifier(verbosity=-1, random_state=rs),
+    "FRNNClassifier": lambda rs: FRNNClassifier(),
+    "FROVOCOClassifier": lambda rs: FROVOCOClassifier(),
+    "ExplainableBoostingClassifier": lambda rs: _make_ebm("classifier", rs),
+    "RuleFitClassifier": lambda rs: _make_imodels("RuleFitClassifier", rs),
+    "FIGSClassifier": lambda rs: _make_imodels("FIGSClassifier", rs),
+    # --- regressors ---
+    "SVR": lambda rs: SVR(),
+    "KNeighborsRegressor": lambda rs: KNeighborsRegressor(),
+    "RandomForestRegressor": lambda rs: RandomForestRegressor(random_state=rs),
+    "ExtraTreesRegressor": lambda rs: ExtraTreesRegressor(random_state=rs),
+    "AdaBoostRegressor": lambda rs: AdaBoostRegressor(random_state=rs),
+    "GradientBoostingRegressor": lambda rs: GradientBoostingRegressor(random_state=rs),
+    "HistGradientBoostingRegressor": lambda rs: HistGradientBoostingRegressor(random_state=rs),
+    "MLPRegressor": lambda rs: MLPRegressor(max_iter=1000, early_stopping=True, random_state=rs),
+    "LinearRegression": lambda rs: LinearRegression(),
+    "Ridge": lambda rs: Ridge(),
+    "Lasso": lambda rs: Lasso(max_iter=5000),
+    "ElasticNet": lambda rs: ElasticNet(max_iter=5000),
+    "DecisionTreeRegressor": lambda rs: DecisionTreeRegressor(random_state=rs),
+    "SGDRegressor": lambda rs: SGDRegressor(max_iter=1000, tol=1e-3, random_state=rs),
+    "GaussianProcessRegressor": lambda rs: GaussianProcessRegressor(random_state=rs),
+    "KernelRidge": lambda rs: KernelRidge(),
+    "PLSRegression": lambda rs: PLSRegression(max_iter=1000),
+    "BayesianRidge": lambda rs: BayesianRidge(),
+    "HuberRegressor": lambda rs: HuberRegressor(max_iter=1000),
+    "LinearSVR": lambda rs: LinearSVR(dual=True, max_iter=5000, random_state=rs),
+    "CatBoostRegressor": lambda rs: CatBoostRegressor(verbose=False, allow_writing_files=False, random_state=rs),
+    "XGBRegressor": lambda rs: XGBRegressor(verbosity=0, random_state=rs),
+    "LGBMRegressor": lambda rs: LGBMRegressor(verbosity=-1, random_state=rs),
+    "FRNNRegressor": lambda rs: FRNNRegressor(),
+    "ExplainableBoostingRegressor": lambda rs: _make_ebm("regressor", rs),
+    "RuleFitRegressor": lambda rs: _make_imodels("RuleFitRegressor", rs),
+    "FIGSRegressor": lambda rs: _make_imodels("FIGSRegressor", rs),
 }
 
-if CATBOOST_AVAILABLE:
-    CLASSIFIERS["CatBoostClassifier"] = lambda **kw: CatBoostClassifier(verbose=0, random_seed=kw.pop("random_state", None), **kw)
 
-if XGBOOST_AVAILABLE:
-    CLASSIFIERS["XGBClassifier"] = lambda **kw: XGBClassifier(verbosity=0, **kw)
+def check_factories():
+    """Fail loudly if a supported algorithm has no default-estimator factory."""
+    missing = [n for n in CLASSIFIER_NAMES + REGRESSOR_NAMES if n not in DEFAULT_FACTORIES]
+    if missing:
+        raise RuntimeError(
+            "benchmark.py has no default-estimator factory for supported algorithm(s): "
+            + ", ".join(missing)
+            + ". Add them to DEFAULT_FACTORIES so they are not silently skipped."
+        )
 
-if LIGHTGBM_AVAILABLE:
-    CLASSIFIERS["LGBMClassifier"] = lambda **kw: LGBMClassifier(verbose=-1, **kw)
 
-REGRESSORS = {
-    "SVR": SVR,
-    "KNeighborsRegressor": KNeighborsRegressor,
-    "RandomForestRegressor": RandomForestRegressor,
-    "ExtraTreesRegressor": ExtraTreesRegressor,
-    "AdaBoostRegressor": AdaBoostRegressor,
-    "GradientBoostingRegressor": GradientBoostingRegressor,
-    "HistGradientBoostingRegressor": HistGradientBoostingRegressor,
-    "LinearRegression": LinearRegression,
-    "Ridge": Ridge,
-    "Lasso": Lasso,
-    "ElasticNet": ElasticNet,
-    "DecisionTreeRegressor": DecisionTreeRegressor,
-    "MLPRegressor": lambda **kw: MLPRegressor(max_iter=1000, **kw),
-    "SGDRegressor": lambda **kw: SGDRegressor(max_iter=1000, **kw),
-}
-
-if CATBOOST_AVAILABLE:
-    REGRESSORS["CatBoostRegressor"] = lambda **kw: CatBoostRegressor(verbose=0, random_seed=kw.pop("random_state", None), **kw)
-
-if XGBOOST_AVAILABLE:
-    REGRESSORS["XGBRegressor"] = lambda **kw: XGBRegressor(verbosity=0, **kw)
-
-if LIGHTGBM_AVAILABLE:
-    REGRESSORS["LGBMRegressor"] = lambda **kw: LGBMRegressor(verbose=-1, **kw)
+check_factories()
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def score_default(estimator_factory, X_train, y_train, X_test, y_test, scoring, cv):
-    """Evaluate an estimator with default hyperparameters."""
-    model = estimator_factory(random_state=RANDOM_STATE) if _accepts_random_state(estimator_factory) else estimator_factory()
+def _make_cv(task):
+    """Same shuffled, seeded splitter OptuML builds for an int ``cv``."""
+    cls = StratifiedKFold if task == "classification" else KFold
+    return cls(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+
+
+def score_default(algo_name, X_train, y_train, X_test, y_test, scoring, task):
+    """Evaluate an algorithm with default hyperparameters.
+
+    The default estimator is wrapped with OptuML's own scaling logic (StandardScaler
+    pipeline and target standardization where applicable), so the comparison
+    against OptuML measures hyperparameter tuning only, not preprocessing.
+    """
+    model = DEFAULT_FACTORIES[algo_name](RANDOM_STATE)
+    inner = Optimizer(algorithm=algo_name, random_state=RANDOM_STATE)._optimizer
+    model = inner._wrap_model(model, X_train)
+    cv = _make_cv(task)
     t0 = time.time()
     cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring=scoring)
     model.fit(X_train, y_train)
@@ -171,29 +229,14 @@ def score_optuml(algorithm, X_train, y_train, X_test, y_test, scoring, cv, n_tri
     return opt.best_score_, test_score, elapsed, opt.best_params_
 
 
-def _accepts_random_state(factory):
-    """Check if factory/class accepts random_state (directly or via **kwargs)."""
-    import inspect
-    from inspect import Parameter
-
-    try:
-        sig = inspect.signature(factory)
-        if "random_state" in sig.parameters:
-            return True
-        # Also return True if the factory accepts **kwargs (e.g. lambda wrappers)
-        return any(p.kind == Parameter.VAR_KEYWORD for p in sig.parameters.values())
-    except (ValueError, TypeError):
-        return False
-
-
-def run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring):
+def run_algo(algo_name, task, X_train, y_train, X_test, y_test, scoring):
     """Run default + quick + full for a single algorithm, with progress output."""
     sys.stdout.write(f"  {algo_name}... ")
     sys.stdout.flush()
 
     # Default
     try:
-        def_cv, def_test, def_time = score_default(factory, X_train, y_train, X_test, y_test, scoring, CV_FOLDS)
+        def_cv, def_test, def_time = score_default(algo_name, X_train, y_train, X_test, y_test, scoring, task)
     except Exception as e:
         def_cv, def_test, def_time = float("nan"), float("nan"), 0.0
         sys.stdout.write(f"[default failed: {e}] ")
@@ -263,8 +306,8 @@ def run_classification_benchmark(all_records):
         print(f"\n--- {ds_name} (n={len(X)}, features={X.shape[1]}, classes={len(np.unique(y))}) ---")
         print(f"    Scoring: {scoring}, CV folds: {CV_FOLDS}, timeout: {PER_ALGO_TIMEOUT}s per run\n")
 
-        for algo_name, factory in CLASSIFIERS.items():
-            record = run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring)
+        for algo_name in CLASSIFIER_NAMES:
+            record = run_algo(algo_name, "classification", X_train, y_train, X_test, y_test, scoring)
             record["dataset"] = ds_name
             record["task"] = "classification"
             all_records.append(record)
@@ -284,8 +327,8 @@ def run_regression_benchmark(all_records):
         print(f"\n--- {ds_name} (n={len(X)}, features={X.shape[1]}) ---")
         print(f"    Scoring: {scoring}, CV folds: {CV_FOLDS}, timeout: {PER_ALGO_TIMEOUT}s per run\n")
 
-        for algo_name, factory in REGRESSORS.items():
-            record = run_algo(algo_name, factory, X_train, y_train, X_test, y_test, scoring)
+        for algo_name in REGRESSOR_NAMES:
+            record = run_algo(algo_name, "regression", X_train, y_train, X_test, y_test, scoring)
             record["dataset"] = ds_name
             record["task"] = "regression"
             all_records.append(record)

@@ -26,6 +26,13 @@ from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis as QDA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
+from sklearn.gaussian_process import GaussianProcessClassifier, GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import ConstantKernel, RBF, Matern, RationalQuadratic
+from sklearn.svm import LinearSVC, LinearSVR
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.linear_model import BayesianRidge, HuberRegressor
 from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
@@ -51,6 +58,13 @@ try:
     LIGHTGBM_AVAILABLE = True
 except ImportError:
     LIGHTGBM_AVAILABLE = False
+
+# interpret (EBM) and imodels (RuleFit, FIGS) are only probed here and imported lazily
+# where used: imodels pulls in matplotlib/mlxtend, too heavy for `import optuml`.
+import importlib.util as _importlib_util
+
+INTERPRET_AVAILABLE = _importlib_util.find_spec("interpret") is not None
+IMODELS_AVAILABLE = _importlib_util.find_spec("imodels") is not None
 
 try:
     import frlearn  # noqa: F401  (fuzzy-rough-learn, optional)
@@ -451,6 +465,82 @@ class RoughSetClassifier(ClassifierMixin, BaseEstimator):
         return lines
 
 
+# ---------------------------------------------------------------------------
+# Interpretable models: EBM (interpret) and RuleFit / FIGS (imodels)
+# ---------------------------------------------------------------------------
+# EBM settings fixed for tuning cost: pairwise interaction detection (default
+# interactions="3x") costs ~10-50x per fit, so OptuML searches main-effects-only
+# EBMs (a pure GAM: every feature's effect is one plottable curve). outer_bags is
+# reduced from 14 to 4 and n_jobs=1 so OptuML, not EBM, controls parallelism.
+_EBM_FIXED = dict(interactions=0, outer_bags=4, n_jobs=1)
+
+
+def _make_ebm(kind, random_state, **params):
+    from interpret.glassbox import ExplainableBoostingClassifier, ExplainableBoostingRegressor
+    cls = ExplainableBoostingClassifier if kind == "classifier" else ExplainableBoostingRegressor
+    if random_state is not None:
+        params["random_state"] = random_state
+    return cls(**_EBM_FIXED, **params)
+
+
+def _suggest_ebm(trial):
+    """EBM search space; defaults (max_bins=1024, max_leaves=2, min_samples_leaf=4,
+    learning_rate 0.015 clf / 0.04 reg) are all inside."""
+    return dict(
+        learning_rate=trial.suggest_float("learning_rate", 1e-3, 0.2, log=True),
+        max_bins=trial.suggest_int("max_bins", 32, 1024, log=True),
+        max_leaves=trial.suggest_int("max_leaves", 2, 4),
+        min_samples_leaf=trial.suggest_int("min_samples_leaf", 2, 20),
+    )
+
+
+def _make_imodels(name, random_state, **params):
+    import imodels
+    model = getattr(imodels, name)(random_state=random_state, **params)
+    if name == "RuleFitClassifier":
+        # imodels' RuleFit is binary-only ("does not yet support multiclass").
+        # One-vs-rest gives one rule set per class; for two classes sklearn's
+        # OneVsRestClassifier fits a single estimator, so binary use is unchanged.
+        from sklearn.multiclass import OneVsRestClassifier
+        model = OneVsRestClassifier(model)
+    return model
+
+
+def _suggest_rulefit(trial):
+    """RuleFit search space; defaults (n_estimators=100, tree_size=4, max_rules=30,
+    include_linear=True) are all inside."""
+    return dict(
+        n_estimators=trial.suggest_int("n_estimators", 50, 200),
+        tree_size=trial.suggest_int("tree_size", 2, 8),
+        max_rules=trial.suggest_int("max_rules", 10, 60),
+        include_linear=trial.suggest_categorical("include_linear", [True, False]),
+    )
+
+
+def _suggest_figs(trial):
+    """FIGS search space; defaults (max_rules=12, max_trees=None, max_depth=None,
+    min_impurity_decrease=0) are all inside (None via sentinels)."""
+    params = dict(
+        max_rules=trial.suggest_int("max_rules", 2, 40),
+        min_impurity_decrease=trial.suggest_float("min_impurity_decrease", 0.0, 0.05),
+    )
+    params["max_trees"] = None if trial.suggest_categorical("max_trees_none", [True, False]) \
+        else trial.suggest_int("max_trees", 1, 5)
+    params["max_depth"] = None if trial.suggest_categorical("max_depth_none", [True, False]) \
+        else trial.suggest_int("max_depth", 1, 6)
+    return params
+
+
+def _figs_params(params):
+    """Collapse FIGS sentinels in best_params_ back into estimator kwargs."""
+    params = dict(params)
+    for key in ("max_trees", "max_depth"):
+        if params.pop(f"{key}_none", False):
+            params.pop(key, None)
+            params[key] = None
+    return params
+
+
 # Algorithms whose performance depends materially on feature scaling (distance-based,
 # gradient-based, or regularized-linear models). Tree ensembles, naive Bayes, QDA and
 # plain OLS are scale-invariant for prediction and are intentionally excluded, so
@@ -458,11 +548,27 @@ class RoughSetClassifier(ClassifierMixin, BaseEstimator):
 _SCALE_SENSITIVE_ALGORITHMS = frozenset({
     # classifiers
     "SVC", "KNeighborsClassifier", "MLPClassifier", "LogisticRegression",
-    "RidgeClassifier", "SGDClassifier",
+    "RidgeClassifier", "SGDClassifier", "GaussianProcessClassifier", "LinearSVC",
     # regressors
     "SVR", "KNeighborsRegressor", "MLPRegressor", "Ridge", "Lasso", "ElasticNet",
-    "SGDRegressor",
+    "SGDRegressor", "GaussianProcessRegressor", "KernelRidge", "BayesianRidge",
+    "HuberRegressor", "LinearSVR",
 })
+
+
+def _make_gp_kernel(kind, nu=None):
+    """Build a Gaussian-process kernel from a string name (kernel objects never go into best_params_).
+
+    The kernel hyperparameters (amplitude, length scale, ...) are fit internally by
+    marginal-likelihood maximisation, so only the kernel *family* is searched.
+    """
+    if kind == "rbf":
+        return ConstantKernel(1.0) * RBF(1.0)
+    if kind == "matern":
+        return ConstantKernel(1.0) * Matern(1.0, nu=nu)
+    if kind == "rational_quadratic":
+        return ConstantKernel(1.0) * RationalQuadratic()
+    raise ValueError(f"Unknown GP kernel kind: {kind!r}")
 
 
 def _decode_hidden_layers(s):
@@ -479,6 +585,7 @@ def _decode_hidden_layers(s):
 # Algorithms that handle missing values natively; for these, NaN in X is allowed
 # through validation (inf is still rejected). y must always be finite.
 _NAN_TOLERANT_ALGORITHMS = frozenset({
+    "ExplainableBoostingClassifier", "ExplainableBoostingRegressor",
     "HistGradientBoostingClassifier", "HistGradientBoostingRegressor",
     "XGBClassifier", "XGBRegressor", "LGBMClassifier", "LGBMRegressor",
     "CatBoostClassifier", "CatBoostRegressor",
@@ -486,7 +593,7 @@ _NAN_TOLERANT_ALGORITHMS = frozenset({
 
 # Regressors whose hyperparameter ranges (epsilon, C, learning rates) assume a
 # unit-scale target; with scale on, y is standardized via TransformedTargetRegressor.
-_TARGET_SCALE_ALGORITHMS = frozenset({"SVR", "MLPRegressor", "SGDRegressor"})
+_TARGET_SCALE_ALGORITHMS = frozenset({"SVR", "MLPRegressor", "SGDRegressor", "LinearSVR"})
 
 
 def _nested_cv_score(estimator, X, y, scoring, outer_cv, random_state, stratify):
@@ -724,6 +831,17 @@ class OptimizerBase(BaseEstimator):
             return optuna.samplers.TPESampler(seed=self.random_state, multivariate=True, group=True)
 
     @staticmethod
+    def _resolve_kernel_ridge_gamma(params):
+        """Collapse KernelRidge's two-step gamma ("default"/"value" + ``gamma_value``) into ``gamma``.
+
+        "default" maps to ``gamma=None`` (sklearn default). Mutates and returns ``params``.
+        """
+        gamma_value = params.pop("gamma_value", None)
+        if "gamma" in params:
+            params["gamma"] = gamma_value if params["gamma"] == "value" else None
+        return params
+
+    @staticmethod
     def _resolve_svm_gamma(params):
         """Convert the two-step gamma encoding back into a single SVC/SVR ``gamma`` arg.
 
@@ -888,6 +1006,9 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
         "MLPClassifier",
         "GaussianNB",
         "QDA",
+        "LDA",
+        "GaussianProcessClassifier",
+        "LinearSVC",
         "LogisticRegression",
         "RidgeClassifier",
         "DecisionTreeClassifier",
@@ -907,6 +1028,10 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
             algos.append("LGBMClassifier")
         if FRLEARN_AVAILABLE:
             algos.extend(["FRNNClassifier", "FROVOCOClassifier"])
+        if INTERPRET_AVAILABLE:
+            algos.append("ExplainableBoostingClassifier")
+        if IMODELS_AVAILABLE:
+            algos.extend(["RuleFitClassifier", "FIGSClassifier"])
         return algos
 
     def __init__(self, algorithm="SVC", scoring="accuracy", **kwargs):
@@ -1046,6 +1171,36 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
             reg_param = trial.suggest_float("reg_param", 0.0, 1.0)
             model = QDA(reg_param=reg_param)
 
+        elif self.algorithm == "LDA":
+            solver = trial.suggest_categorical("solver", ["svd", "lsqr", "eigen"])
+            lda_params = {"solver": solver}
+            if solver != "svd":
+                mode = trial.suggest_categorical("shrinkage_mode", ["none", "auto", "value"])
+                if mode == "auto":
+                    lda_params["shrinkage"] = "auto"
+                elif mode == "value":
+                    lda_params["shrinkage"] = trial.suggest_float("shrinkage", 0.0, 1.0)
+            model = LDA(**lda_params)
+
+        elif self.algorithm == "GaussianProcessClassifier":
+            kind = trial.suggest_categorical("kernel", ["rbf", "matern", "rational_quadratic"])
+            nu = trial.suggest_categorical("nu", [0.5, 1.5, 2.5]) if kind == "matern" else None
+            n_restarts = trial.suggest_int("n_restarts_optimizer", 0, 3)
+            model = GaussianProcessClassifier(
+                kernel=_make_gp_kernel(kind, nu),
+                n_restarts_optimizer=n_restarts,
+                random_state=self.random_state,
+            )
+
+        elif self.algorithm == "LinearSVC":
+            C = trial.suggest_float("C", 1e-3, 1e2, log=True)
+            loss = trial.suggest_categorical("loss", ["squared_hinge", "hinge"])
+            penalty = trial.suggest_categorical("penalty", ["l2", "l1"]) if loss == "squared_hinge" else "l2"
+            model = LinearSVC(
+                C=C, loss=loss, penalty=penalty, dual=(penalty != "l1"),
+                max_iter=5000, random_state=self.random_state,
+            )
+
         elif self.algorithm == "LogisticRegression":
             C = trial.suggest_float("C", 1e-4, 1e2, log=True)
             solver = trial.suggest_categorical("solver", ["lbfgs", "newton-cg", "saga"])
@@ -1178,6 +1333,15 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
             if learning_rate_schedule != "optimal":
                 sgd_params["eta0"] = trial.suggest_float("eta0", 1e-4, 1.0, log=True)
             model = SGDClassifier(**sgd_params, tol=1e-3)
+
+        elif self.algorithm == "ExplainableBoostingClassifier" and INTERPRET_AVAILABLE:
+            model = _make_ebm("classifier", self.random_state, **_suggest_ebm(trial))
+
+        elif self.algorithm == "RuleFitClassifier" and IMODELS_AVAILABLE:
+            model = _make_imodels("RuleFitClassifier", self.random_state, **_suggest_rulefit(trial))
+
+        elif self.algorithm == "FIGSClassifier" and IMODELS_AVAILABLE:
+            model = _make_imodels("FIGSClassifier", self.random_state, **_suggest_figs(trial))
 
         elif self.algorithm == "RoughSetClassifier":
             # defaults: n_bins=5, quantile bins, exact reduct, min_support=1, possible rules on
@@ -1347,6 +1511,24 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
             self.best_estimator_ = GaussianNB(**params)
         elif self.algorithm == "QDA":
             self.best_estimator_ = QDA(**params)
+        elif self.algorithm == "LDA":
+            mode = params.pop("shrinkage_mode", None)
+            if mode == "none":
+                params.pop("shrinkage", None)
+            elif mode == "auto":
+                params["shrinkage"] = "auto"
+            self.best_estimator_ = LDA(**params)
+        elif self.algorithm == "GaussianProcessClassifier":
+            kind = params.pop("kernel")
+            nu = params.pop("nu", None)
+            self.best_estimator_ = GaussianProcessClassifier(
+                kernel=_make_gp_kernel(kind, nu), **params, random_state=self.random_state
+            )
+        elif self.algorithm == "LinearSVC":
+            params.setdefault("penalty", "l2")
+            self.best_estimator_ = LinearSVC(
+                **params, dual=(params["penalty"] != "l1"), max_iter=5000, random_state=self.random_state
+            )
         elif self.algorithm == "LogisticRegression":
             self.best_estimator_ = _make_logistic_regression(**params, random_state=self.random_state, max_iter=1000)
         elif self.algorithm == "RidgeClassifier":
@@ -1369,6 +1551,12 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
             self.best_estimator_ = LGBMClassifier(**params, subsample_freq=1, random_state=self.random_state, verbosity=-1)
         elif self.algorithm == "SGDClassifier":
             self.best_estimator_ = SGDClassifier(**params, max_iter=1000, tol=1e-3, random_state=self.random_state)
+        elif self.algorithm == "ExplainableBoostingClassifier" and INTERPRET_AVAILABLE:
+            self.best_estimator_ = _make_ebm("classifier", self.random_state, **params)
+        elif self.algorithm == "RuleFitClassifier" and IMODELS_AVAILABLE:
+            self.best_estimator_ = _make_imodels("RuleFitClassifier", self.random_state, **params)
+        elif self.algorithm == "FIGSClassifier" and IMODELS_AVAILABLE:
+            self.best_estimator_ = _make_imodels("FIGSClassifier", self.random_state, **_figs_params(params))
         elif self.algorithm == "RoughSetClassifier":
             self.best_estimator_ = RoughSetClassifier(**params)
         elif self.algorithm == "FRNNClassifier" and FRLEARN_AVAILABLE:
@@ -1455,6 +1643,12 @@ class RegressorOptimizer(RegressorMixin, OptimizerBase):
         "ElasticNet",
         "DecisionTreeRegressor",
         "SGDRegressor",
+        "GaussianProcessRegressor",
+        "KernelRidge",
+        "PLSRegression",
+        "BayesianRidge",
+        "HuberRegressor",
+        "LinearSVR",
     )
 
     # Algorithms with no tunable hyperparameters: run only 1 Optuna trial.
@@ -1472,6 +1666,10 @@ class RegressorOptimizer(RegressorMixin, OptimizerBase):
             algos.append("LGBMRegressor")
         if FRLEARN_AVAILABLE:
             algos.append("FRNNRegressor")
+        if INTERPRET_AVAILABLE:
+            algos.append("ExplainableBoostingRegressor")
+        if IMODELS_AVAILABLE:
+            algos.extend(["RuleFitRegressor", "FIGSRegressor"])
         return algos
 
     def __init__(self, algorithm="SVR", scoring="r2", **kwargs):
@@ -1629,6 +1827,52 @@ class RegressorOptimizer(RegressorMixin, OptimizerBase):
             l1_ratio = trial.suggest_float("l1_ratio", 0.0, 1.0)
             model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=5000)
 
+        elif self.algorithm == "GaussianProcessRegressor":
+            kind = trial.suggest_categorical("kernel", ["rbf", "matern", "rational_quadratic"])
+            nu = trial.suggest_categorical("nu", [0.5, 1.5, 2.5]) if kind == "matern" else None
+            alpha = trial.suggest_float("alpha", 1e-10, 1e0, log=True)
+            normalize_y = trial.suggest_categorical("normalize_y", [False, True])
+            n_restarts = trial.suggest_int("n_restarts_optimizer", 0, 3)
+            model = GaussianProcessRegressor(
+                kernel=_make_gp_kernel(kind, nu), alpha=alpha, normalize_y=normalize_y,
+                n_restarts_optimizer=n_restarts, random_state=self.random_state,
+            )
+
+        elif self.algorithm == "KernelRidge":
+            alpha = trial.suggest_float("alpha", 1e-4, 1e2, log=True)
+            kernel = trial.suggest_categorical("kernel", ["linear", "rbf", "poly", "laplacian", "sigmoid"])
+            kr_params = {"alpha": alpha, "kernel": kernel}
+            if kernel != "linear":
+                gamma_mode = trial.suggest_categorical("gamma", ["default", "value"])
+                if gamma_mode == "value":
+                    kr_params["gamma"] = trial.suggest_float("gamma_value", 1e-4, 1e1, log=True)
+                if kernel == "poly":
+                    kr_params["degree"] = trial.suggest_int("degree", 2, 5)
+            model = KernelRidge(**kr_params)
+
+        elif self.algorithm == "PLSRegression":
+            n_components = trial.suggest_int("n_components", 1, max(1, min(20, X.shape[1])))
+            model = PLSRegression(n_components=n_components, max_iter=1000)
+
+        elif self.algorithm == "BayesianRidge":
+            model = BayesianRidge(
+                alpha_1=trial.suggest_float("alpha_1", 1e-8, 1e-4, log=True),
+                alpha_2=trial.suggest_float("alpha_2", 1e-8, 1e-4, log=True),
+                lambda_1=trial.suggest_float("lambda_1", 1e-8, 1e-4, log=True),
+                lambda_2=trial.suggest_float("lambda_2", 1e-8, 1e-4, log=True),
+            )
+
+        elif self.algorithm == "HuberRegressor":
+            epsilon = trial.suggest_float("epsilon", 1.0, 3.0)
+            alpha = trial.suggest_float("alpha", 1e-6, 1e0, log=True)
+            model = HuberRegressor(epsilon=epsilon, alpha=alpha, max_iter=1000)
+
+        elif self.algorithm == "LinearSVR":
+            C = trial.suggest_float("C", 1e-3, 1e2, log=True)
+            loss = trial.suggest_categorical("loss", ["epsilon_insensitive", "squared_epsilon_insensitive"])
+            epsilon = trial.suggest_float("epsilon", 0.0, 1.0)
+            model = LinearSVR(C=C, loss=loss, epsilon=epsilon, dual=True, max_iter=5000, random_state=self.random_state)
+
         elif self.algorithm == "LGBMRegressor" and LIGHTGBM_AVAILABLE:
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
             max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
@@ -1722,6 +1966,15 @@ class RegressorOptimizer(RegressorMixin, OptimizerBase):
             if learning_rate_schedule != "optimal":
                 sgd_params["eta0"] = trial.suggest_float("eta0", 1e-4, 1.0, log=True)
             model = SGDRegressor(**sgd_params, tol=1e-3)
+
+        elif self.algorithm == "ExplainableBoostingRegressor" and INTERPRET_AVAILABLE:
+            model = _make_ebm("regressor", self.random_state, **_suggest_ebm(trial))
+
+        elif self.algorithm == "RuleFitRegressor" and IMODELS_AVAILABLE:
+            model = _make_imodels("RuleFitRegressor", self.random_state, **_suggest_rulefit(trial))
+
+        elif self.algorithm == "FIGSRegressor" and IMODELS_AVAILABLE:
+            model = _make_imodels("FIGSRegressor", self.random_state, **_suggest_figs(trial))
 
         elif self.algorithm == "FRNNRegressor" and FRLEARN_AVAILABLE:
             # frlearn default: k=10, chebyshev
@@ -1868,6 +2121,23 @@ class RegressorOptimizer(RegressorMixin, OptimizerBase):
         elif self.algorithm == "MLPRegressor":
             params["hidden_layer_sizes"] = _decode_hidden_layers(params["hidden_layer_sizes"])
             self.best_estimator_ = MLPRegressor(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
+        elif self.algorithm == "GaussianProcessRegressor":
+            kind = params.pop("kernel")
+            nu = params.pop("nu", None)
+            self.best_estimator_ = GaussianProcessRegressor(
+                kernel=_make_gp_kernel(kind, nu), **params, random_state=self.random_state
+            )
+        elif self.algorithm == "KernelRidge":
+            params = self._resolve_kernel_ridge_gamma(params)
+            self.best_estimator_ = KernelRidge(**params)
+        elif self.algorithm == "PLSRegression":
+            self.best_estimator_ = PLSRegression(**params, max_iter=1000)
+        elif self.algorithm == "BayesianRidge":
+            self.best_estimator_ = BayesianRidge(**params)
+        elif self.algorithm == "HuberRegressor":
+            self.best_estimator_ = HuberRegressor(**params, max_iter=1000)
+        elif self.algorithm == "LinearSVR":
+            self.best_estimator_ = LinearSVR(**params, dual=True, max_iter=5000, random_state=self.random_state)
         elif self.algorithm == "LinearRegression":
             self.best_estimator_ = LinearRegression(**params)
         elif self.algorithm == "Ridge":
@@ -1892,6 +2162,12 @@ class RegressorOptimizer(RegressorMixin, OptimizerBase):
             self.best_estimator_ = LGBMRegressor(**params, subsample_freq=1, random_state=self.random_state, verbosity=-1)
         elif self.algorithm == "SGDRegressor":
             self.best_estimator_ = SGDRegressor(**params, max_iter=1000, tol=1e-3, random_state=self.random_state)
+        elif self.algorithm == "ExplainableBoostingRegressor" and INTERPRET_AVAILABLE:
+            self.best_estimator_ = _make_ebm("regressor", self.random_state, **params)
+        elif self.algorithm == "RuleFitRegressor" and IMODELS_AVAILABLE:
+            self.best_estimator_ = _make_imodels("RuleFitRegressor", self.random_state, **params)
+        elif self.algorithm == "FIGSRegressor" and IMODELS_AVAILABLE:
+            self.best_estimator_ = _make_imodels("FIGSRegressor", self.random_state, **_figs_params(params))
         elif self.algorithm == "FRNNRegressor" and FRLEARN_AVAILABLE:
             self.best_estimator_ = FRNNRegressor(**params)
         else:
@@ -1906,7 +2182,11 @@ class RegressorOptimizer(RegressorMixin, OptimizerBase):
             with _warnings.catch_warnings():
                 _warnings.filterwarnings("ignore", message=".*feature names.*", category=UserWarning)
                 return self.best_estimator_.predict(X)
-        return self.best_estimator_.predict(X)
+        pred = self.best_estimator_.predict(X)
+        # PLSRegression (sklearn < 1.3) returns (n, 1) for 1-D y.
+        if pred.ndim == 2 and pred.shape[1] == 1 and self.n_outputs_ == 1:
+            pred = pred.ravel()
+        return pred
 
     def score(self, X, y):
         """Return the coefficient of determination R^2 of the prediction.

@@ -188,22 +188,24 @@ def test_optimizer_with_different_scoring(classification_data):
 
 def test_optimizer_timeout(classification_data):
     """Test that the optimizer respects the timeout parameter."""
-    pytest.importorskip("xgboost")
     X_train, X_test, y_train, y_test = classification_data
+    timeout, cv_timeout = 5, 10
     optimizer = Optimizer(
-        algorithm="XGBClassifier",
-        n_trials=1000,  # Large number of trials
-        timeout=5,      # Short timeout
+        algorithm="RandomForestClassifier",  # cheap trials, so CPU contention cannot prune them all
+        n_trials=1000,           # Large number of trials
+        timeout=timeout,         # Short study timeout
+        cv_timeout=cv_timeout,   # Caps the one in-flight trial that can overrun it
         random_state=42
     )
     optimizer.fit(X_train, y_train)
 
     # Primary intent: the timeout must stop the study well before all 1000 trials run.
     assert optimizer.n_trials_completed_ < 1000
-    # Wall-clock should be close to the timeout. The bound is generous because Optuna
-    # only checks the timeout between trials, so one in-flight trial can overrun it
-    # (and the exact overrun depends on machine load).
-    assert optimizer.study_time_ <= 15
+    # Optuna only checks `timeout` between trials, so one in-flight trial can overrun
+    # it - but by at most `cv_timeout`, after which that trial is pruned. The bound is
+    # therefore independent of machine speed (slow CI runners used to exceed a fixed
+    # 15 s bound when cv_timeout was the 120 s default).
+    assert optimizer.study_time_ <= timeout + cv_timeout + 3
 
 
 def test_optimizer_direction_minimize(regression_data):
@@ -1084,3 +1086,152 @@ def test_rough_set_via_optimizer(classification_data_binary):
     assert opt.score(X_test, y_test) > 0.85
     assert set(opt.best_params_) == {"n_bins", "strategy", "reduct_epsilon", "min_support", "use_possible_rules"}
     assert type(opt.best_estimator_).__name__ == "RoughSetClassifier"  # not scaled
+
+
+# --------------------------------------------------------------------------------------
+# New estimators: LDA, GaussianProcess*, LinearSVC/SVR, KernelRidge, PLS, BayesianRidge, Huber
+# --------------------------------------------------------------------------------------
+
+_SENTINEL_KEYS = {"shrinkage_mode", "gamma_value", "max_depth_none", "l2_zero"}
+
+
+def _assert_clean_params(opt):
+    for k, v in opt.best_params_.items():
+        assert isinstance(v, (str, int, float, bool)), (k, v)
+        assert "Kernel" not in type(v).__name__ and "kernel" not in type(v).__name__.lower()
+    est = opt.best_estimator_
+    params = est.get_params(deep=True)
+    leaked = {k for k in params if k.split("__")[-1] in _SENTINEL_KEYS}
+    assert not leaked, leaked
+
+
+@pytest.mark.parametrize("algorithm", ["LDA", "GaussianProcessClassifier", "LinearSVC"])
+def test_new_classifiers_smoke(algorithm):
+    X, y = load_breast_cancer(return_X_y=True)
+    if algorithm == "GaussianProcessClassifier":
+        X, y = X[:150], y[:150]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=0, stratify=y)
+    opt = Optimizer(algorithm=algorithm, n_trials=4, cv=3, random_state=0).fit(X_train, y_train)
+    assert opt.score(X_test, y_test) > 0.85
+    _assert_clean_params(opt)
+    if algorithm == "GaussianProcessClassifier":
+        assert "kernel" in opt.best_params_ and isinstance(opt.best_params_["kernel"], str)
+
+
+@pytest.mark.parametrize("algorithm", [
+    "GaussianProcessRegressor", "KernelRidge", "PLSRegression",
+    "BayesianRidge", "HuberRegressor", "LinearSVR",
+])
+def test_new_regressors_smoke(algorithm):
+    X, y = load_diabetes(return_X_y=True)
+    if algorithm == "GaussianProcessRegressor":
+        X, y = X[:200], y[:200]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=0)
+    opt = Optimizer(algorithm=algorithm, n_trials=4, cv=3, random_state=0).fit(X_train, y_train)
+    threshold = 0.1 if algorithm == "GaussianProcessRegressor" else 0.2
+    assert opt.score(X_test, y_test) > threshold
+    _assert_clean_params(opt)
+    assert opt.predict(X_test).shape == (len(X_test),)
+
+
+def test_linearsvc_has_decision_function_but_no_predict_proba():
+    X, y = load_iris(return_X_y=True)
+    opt = Optimizer(algorithm="LinearSVC", n_trials=2, cv=3, random_state=0)
+    opt.fit(X, y)
+    assert hasattr(opt, "decision_function")
+    assert not hasattr(opt, "predict_proba")
+    assert opt.decision_function(X[:5]).shape == (5, 3)
+
+
+def test_lda_shrinkage_value_builds_valid_estimator():
+    import optuna
+    from optuml.optuml import ClassifierOptimizer
+    X, y = load_iris(return_X_y=True)
+    co = ClassifierOptimizer(algorithm="LDA", cv=3, random_state=0)
+    co._init_cv_seed()
+    trial = optuna.trial.FixedTrial({"solver": "lsqr", "shrinkage_mode": "value", "shrinkage": 0.3})
+    assert np.isfinite(co._objective(trial, X, y))
+    co.best_params_ = {"solver": "lsqr", "shrinkage_mode": "value", "shrinkage": 0.3}
+    co._create_best_estimator()
+    assert co.best_estimator_.shrinkage == 0.3
+    co.best_estimator_.fit(X, y)
+    for mode, expected in (("none", None), ("auto", "auto")):
+        co.best_params_ = {"solver": "eigen", "shrinkage_mode": mode}
+        co._create_best_estimator()
+        assert co.best_estimator_.shrinkage == expected
+        assert not hasattr(co.best_estimator_, "shrinkage_mode")
+    co.best_params_ = {"solver": "svd"}
+    co._create_best_estimator()
+    assert co.best_estimator_.shrinkage is None
+
+
+def test_pls_predict_is_one_dimensional():
+    X, y = load_diabetes(return_X_y=True)
+    opt = Optimizer(algorithm="PLSRegression", n_trials=2, cv=3, random_state=0).fit(X, y)
+    pred = opt.predict(X[:10])
+    assert pred.shape == (10,)
+    assert 1 <= opt.best_params_["n_components"] <= X.shape[1]
+
+
+# ---------------------------------------------------------------------------
+# Interpretable models: EBM (interpret), RuleFit / FIGS (imodels) - optional
+# ---------------------------------------------------------------------------
+
+_TIER2 = [
+    ("ExplainableBoostingClassifier", "interpret", "clf"),
+    ("RuleFitClassifier", "imodels", "clf"),
+    ("FIGSClassifier", "imodels", "clf"),
+    ("ExplainableBoostingRegressor", "interpret", "reg"),
+    ("RuleFitRegressor", "imodels", "reg"),
+    ("FIGSRegressor", "imodels", "reg"),
+]
+
+
+@pytest.mark.parametrize("algorithm,module,task", _TIER2)
+def test_interpretable_models(algorithm, module, task, classification_data_binary, regression_data):
+    pytest.importorskip(module)
+    data = classification_data_binary if task == "clf" else regression_data
+    X_train, X_test, y_train, y_test = data
+    X_train, y_train = X_train[:150], y_train[:150]  # keep RuleFit's inner LassoCV fast
+    opt = Optimizer(algorithm=algorithm, n_trials=2, cv=3, random_state=0).fit(X_train, y_train)
+    score = opt.score(X_test, y_test)
+    assert score > (0.85 if task == "clf" else 0.2)
+    est_params = opt.best_estimator_.get_params()
+    assert not any(k.endswith("_none") for k in est_params)  # sentinels stripped
+    if task == "clf":
+        assert opt.predict_proba(X_test).shape == (len(X_test), 2)
+    if algorithm.startswith("ExplainableBoosting"):
+        assert est_params["interactions"] == 0 and est_params["outer_bags"] == 4
+
+
+def test_ebm_accepts_nan(classification_data_binary):
+    pytest.importorskip("interpret")
+    X_train, _, y_train, _ = classification_data_binary
+    Xn = X_train.copy()
+    Xn[::6, 1] = np.nan
+    opt = Optimizer(algorithm="ExplainableBoostingClassifier", n_trials=1, cv=3, random_state=0).fit(Xn, y_train)
+    assert opt.predict(Xn[:5]).shape == (5,)
+
+
+def test_figs_sentinels_resolve_to_none():
+    pytest.importorskip("imodels")
+    from optuml.optuml import _figs_params
+    p = _figs_params({"max_rules": 5, "max_trees_none": True, "max_depth_none": False, "max_depth": 3,
+                      "min_impurity_decrease": 0.0})
+    assert p == {"max_rules": 5, "max_trees": None, "max_depth": 3, "min_impurity_decrease": 0.0}
+
+
+def test_import_does_not_load_imodels():
+    """imodels pulls in matplotlib/mlxtend; optuml must only probe it lazily."""
+    import subprocess, sys
+    code = "import sys, optuml.optuml; print('imodels' in sys.modules, 'interpret' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert out.split()[-2:] == ["False", "False"]
+
+
+def test_rulefit_classifier_multiclass(classification_data):
+    pytest.importorskip("imodels")
+    X_train, X_test, y_train, y_test = classification_data  # iris: 3 classes
+    opt = Optimizer(algorithm="RuleFitClassifier", n_trials=1, cv=3, random_state=0).fit(X_train, y_train)
+    assert opt.predict_proba(X_test).shape == (len(X_test), 3)
+    assert len(opt.best_estimator_.estimators_) == 3

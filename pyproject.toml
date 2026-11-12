@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,14 +7,13 @@ name = "optuml"
 version = "0.2.7"
 description = "Hyperparameter optimization for multiple machine learning algorithms using Optuna, with Scikit-learn API"
 readme = "README.md"
-requires-python = ">=3.9"
-license = { text = "MIT" }
+requires-python = ">=3.10"
+license = "MIT"
 authors = [
     { name = "Filip S.", email = "filip.ursynow@gmail.com" },
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -33,7 +32,9 @@ catboost = ["catboost"]
 xgboost = ["xgboost"]
 lightgbm = ["lightgbm"]
 frlearn = ["fuzzy-rough-learn"]
-all = ["catboost", "xgboost", "lightgbm", "fuzzy-rough-learn"]
+interpret = ["interpret-core"]
+imodels = ["imodels"]
+all = ["catboost", "xgboost", "lightgbm", "fuzzy-rough-learn", "interpret-core", "imodels"]
 
 [project.urls]
 Homepage = "https://github.com/filipsPL/optuml"

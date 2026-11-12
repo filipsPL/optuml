@@ -256,6 +256,201 @@ class FRNNRegressor(RegressorMixin, BaseEstimator):
         return np.asarray(self.model_(_dense(X, type(self).__name__)), dtype=float)
 
 
+# ---------------------------------------------------------------------------
+# Classic (Pawlak) rough-set classifier
+# ---------------------------------------------------------------------------
+
+class RoughSetClassifier(ClassifierMixin, BaseEstimator):
+    """Classic rough-set rule classifier (Pawlak, 1982), sklearn API.
+
+    Pipeline, all fit on the training data only:
+
+    1. **Discretisation** - each feature is binned with ``KBinsDiscretizer``
+       (``n_bins``, ``strategy``); two objects are *indiscernible* on a set of
+       attributes when they fall in the same bins.
+    2. **Reduct** - greedy QuickReduct: attributes are added one at a time, each
+       time the one that most increases the dependency degree
+       ``gamma(B) = |POS_B| / |U|`` (fraction of objects whose indiscernibility
+       class is pure, i.e. lies in the lower approximation of its decision
+       class), until ``gamma(B) >= (1 - reduct_epsilon) * gamma(all)``.
+       ``reduct_epsilon > 0`` gives an *approximate reduct* (more robust to noise).
+    3. **Rules** - each indiscernibility class over the reduct is a rule
+       ``IF a1 in bin AND ... THEN decision``. Pure classes give *certain* rules
+       (lower approximation); mixed classes give *possible* rules (boundary
+       region) that predict the class distribution; they are used only if
+       ``use_possible_rules``. Rules with support below ``min_support`` are
+       dropped.
+    4. **Prediction** - an object is matched against the rules over the full
+       reduct; if nothing matches, the last-added reduct attribute is dropped and
+       matching is retried (back-off), down to the class prior.
+
+    Attributes
+    ----------
+    reduct_ : ndarray of int
+        Selected feature indices, in order of selection (most informative first).
+    dependency_ : float
+        Dependency degree of the reduct on the training data.
+    dependency_full_ : float
+        Dependency degree of all attributes (consistency of the discretised data).
+    rules_ : list of dict
+        Certain and possible rules over the full reduct, see :meth:`describe_rules`.
+
+    References
+    ----------
+    Pawlak Z. (1982) Rough sets. Int. J. Computer and Information Sciences 11, 341-356.
+    https://en.wikipedia.org/wiki/Rough_set
+    """
+
+    def __init__(self, n_bins=5, strategy="quantile", reduct_epsilon=0.0,
+                 min_support=1, use_possible_rules=True):
+        self.n_bins = n_bins
+        self.strategy = strategy
+        self.reduct_epsilon = reduct_epsilon
+        self.min_support = min_support
+        self.use_possible_rules = use_possible_rules
+
+    # -- helpers -----------------------------------------------------------
+    def _make_discretizer(self):
+        from sklearn.preprocessing import KBinsDiscretizer
+        kw = dict(n_bins=self.n_bins, encode="ordinal", strategy=self.strategy)
+        available = KBinsDiscretizer().get_params()
+        if "subsample" in available:
+            kw["subsample"] = None  # deterministic bins, no random subsampling
+        if "quantile_method" in available:
+            kw["quantile_method"] = "averaged_inverted_cdf"  # sklearn >= 1.7 default-to-be
+        return KBinsDiscretizer(**kw)
+
+    @staticmethod
+    def _groups(Xd, attrs):
+        """Indiscernibility classes over ``attrs``: group id per row."""
+        if len(attrs) == 0:
+            return np.zeros(len(Xd), dtype=int)
+        return np.unique(Xd[:, attrs], axis=0, return_inverse=True)[1].ravel()
+
+    @staticmethod
+    def _dependency(groups, y):
+        """gamma = fraction of rows in pure indiscernibility classes (positive region)."""
+        pairs = np.unique(np.stack([groups, y], axis=1), axis=0)
+        n_dec = np.bincount(pairs[:, 0])  # distinct decisions per group
+        pure = n_dec[groups] == 1
+        return float(pure.mean())
+
+    def _quick_reduct(self, Xd, y):
+        n_features = Xd.shape[1]
+        all_attrs = list(range(n_features))
+        self.dependency_full_ = self._dependency(self._groups(Xd, all_attrs), y)
+        target = (1.0 - self.reduct_epsilon) * self.dependency_full_
+        reduct, gamma = [], self._dependency(self._groups(Xd, []), y)
+        while gamma < target - 1e-12 and len(reduct) < n_features:
+            best_a, best_g = None, -1.0
+            for a in all_attrs:
+                if a in reduct:
+                    continue
+                g = self._dependency(self._groups(Xd, reduct + [a]), y)
+                if g > best_g:
+                    best_a, best_g = a, g
+            reduct.append(best_a)
+            gamma = best_g
+        return reduct, gamma
+
+    def _rule_table(self, Xd, y, attrs):
+        """Map condition tuple -> class-count vector, for rules over ``attrs``."""
+        n_classes = len(self.classes_)
+        table = {}
+        keys = [tuple(r) for r in Xd[:, attrs].astype(int)] if attrs else [()] * len(Xd)
+        for key, label in zip(keys, y):
+            counts = table.get(key)
+            if counts is None:
+                counts = table[key] = np.zeros(n_classes)
+            counts[label] += 1
+        return table
+
+    def _rule_ok(self, counts):
+        if counts.sum() < self.min_support:
+            return False
+        return self.use_possible_rules or np.count_nonzero(counts) == 1
+
+    # -- sklearn API -------------------------------------------------------
+    def fit(self, X, y):
+        X, y = check_X_y(X, y)
+        if self.n_bins < 2:
+            raise ValueError("n_bins must be >= 2")
+        if not 0.0 <= self.reduct_epsilon < 1.0:
+            raise ValueError("reduct_epsilon must be in [0, 1)")
+        self.classes_, y_idx = np.unique(y, return_inverse=True)
+        self.n_features_in_ = X.shape[1]
+
+        import warnings as _warnings
+        with _warnings.catch_warnings():
+            # constant / low-cardinality features: sklearn warns and merges bins
+            _warnings.simplefilter("ignore", UserWarning)
+            self.discretizer_ = self._make_discretizer().fit(X)
+        Xd = self.discretizer_.transform(X).astype(int)
+
+        reduct, self.dependency_ = self._quick_reduct(Xd, y_idx)
+        self.reduct_ = np.array(reduct, dtype=int)
+        # Back-off tables: level k uses the first k reduct attributes (k=0 is the prior).
+        self._tables = [self._rule_table(Xd, y_idx, reduct[:k]) for k in range(len(reduct) + 1)]
+
+        full = self._tables[-1]
+        self.rules_ = [
+            {"conditions": dict(zip(reduct, key)),
+             "class": np.asarray(self.classes_[int(np.argmax(c))]).item(),
+             "support": int(c.sum()),
+             "confidence": float(c.max() / c.sum()),
+             "certain": bool(np.count_nonzero(c) == 1)}
+            for key, c in full.items() if self._rule_ok(c)
+        ]
+        self.rules_.sort(key=lambda r: (not r["certain"], -r["support"]))
+        return self
+
+    def predict_proba(self, X):
+        check_is_fitted(self, "discretizer_")
+        X = check_array(X)
+        if X.shape[1] != self.n_features_in_:
+            raise ValueError(f"X has {X.shape[1]} features, expected {self.n_features_in_}.")
+        Xd = self.discretizer_.transform(X).astype(int)
+        reduct = list(self.reduct_)
+        prior = self._tables[0][()]
+        proba = np.empty((len(X), len(self.classes_)))
+        for i, row in enumerate(Xd):
+            counts = prior
+            for k in range(len(reduct), 0, -1):
+                c = self._tables[k].get(tuple(row[reduct[:k]]))
+                if c is not None and self._rule_ok(c):
+                    counts = c
+                    break
+            proba[i] = counts / counts.sum()
+        return proba
+
+    def predict(self, X):
+        return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
+
+    def describe_rules(self, feature_names=None, max_rules=None, certain_only=False):
+        """Human-readable decision rules over the reduct, strongest first."""
+        check_is_fitted(self, "rules_")
+        names = feature_names if feature_names is not None else getattr(self, "feature_names_in_", None)
+        lines = []
+        for rule in self.rules_:
+            if certain_only and not rule["certain"]:
+                continue
+            conds = []
+            for f, b in rule["conditions"].items():
+                edges = self.discretizer_.bin_edges_[f]
+                lo = "-inf" if b == 0 else f"{edges[b]:.4g}"
+                hi = "inf" if b >= len(edges) - 2 else f"{edges[b + 1]:.4g}"
+                fname = names[f] if names is not None else f"x{f}"
+                conds.append(f"{fname} in [{lo}, {hi})")
+            kind = "certain" if rule["certain"] else "possible"
+            lines.append(
+                f"IF {' AND '.join(conds) or 'TRUE'} THEN class={rule['class']!r} "
+                f"[{kind}, support={rule['support']}, confidence={rule['confidence']:.2f}]"
+            )
+            if max_rules is not None and len(lines) >= max_rules:
+                break
+        return lines
+
+
 # Algorithms whose performance depends materially on feature scaling (distance-based,
 # gradient-based, or regularized-linear models). Tree ensembles, naive Bayes, QDA and
 # plain OLS are scale-invariant for prediction and are intentionally excluded, so
@@ -697,6 +892,7 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
         "RidgeClassifier",
         "DecisionTreeClassifier",
         "SGDClassifier",
+        "RoughSetClassifier",
     )
 
     @classmethod
@@ -983,6 +1179,16 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
                 sgd_params["eta0"] = trial.suggest_float("eta0", 1e-4, 1.0, log=True)
             model = SGDClassifier(**sgd_params, tol=1e-3)
 
+        elif self.algorithm == "RoughSetClassifier":
+            # defaults: n_bins=5, quantile bins, exact reduct, min_support=1, possible rules on
+            model = RoughSetClassifier(
+                n_bins=trial.suggest_int("n_bins", 2, 10),
+                strategy=trial.suggest_categorical("strategy", ["quantile", "uniform", "kmeans"]),
+                reduct_epsilon=trial.suggest_float("reduct_epsilon", 0.0, 0.2),
+                min_support=trial.suggest_int("min_support", 1, 10),
+                use_possible_rules=trial.suggest_categorical("use_possible_rules", [True, False]),
+            )
+
         elif self.algorithm == "FRNNClassifier" and FRLEARN_AVAILABLE:
             # frlearn default: upper_k = lower_k = 20, linear OWA weights, boscovich
             model = FRNNClassifier(
@@ -1163,6 +1369,8 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
             self.best_estimator_ = LGBMClassifier(**params, subsample_freq=1, random_state=self.random_state, verbosity=-1)
         elif self.algorithm == "SGDClassifier":
             self.best_estimator_ = SGDClassifier(**params, max_iter=1000, tol=1e-3, random_state=self.random_state)
+        elif self.algorithm == "RoughSetClassifier":
+            self.best_estimator_ = RoughSetClassifier(**params)
         elif self.algorithm == "FRNNClassifier" and FRLEARN_AVAILABLE:
             self.best_estimator_ = FRNNClassifier(**params)
         elif self.algorithm == "FROVOCOClassifier" and FRLEARN_AVAILABLE:

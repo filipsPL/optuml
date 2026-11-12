@@ -177,6 +177,7 @@ print(f"R² Score: {r2:.3f}")
 | `QDA`                            | Quadratic Discriminant Analysis | Non-linear boundaries                     |
 | `DecisionTreeClassifier`         | Decision Tree                   | Multiple criteria, pruning                |
 | `SGDClassifier`                  | Stochastic Gradient Descent     | Multiple losses, L1/L2/ElasticNet, online |
+| `RoughSetClassifier`             | Rough Sets (Pawlak)             | Reducts + readable if-then rules          |
 | `CatBoostClassifier`*            | CatBoost                        | Categorical features, GPU support         |
 | `XGBClassifier`*                 | XGBoost                         | Regularization, missing values            |
 | `LGBMClassifier`*                | LightGBM                        | Fast GBDT, leaf-wise growth               |
@@ -223,6 +224,28 @@ Caveats:
 - **`predict_proba` is not calibrated.** It returns fuzzy-rough membership scores, clipped at 0 and normalised per row. They rank classes well (fine for `roc_auc`), but they are not probabilities, so do not use them for thresholding or log-loss. These classifiers have no `decision_function`.
 - **Upstream is unmaintained.** The last `fuzzy-rough-learn` release is 0.2.2 (June 2022). It has worked with NumPy 2.4, scikit-learn 1.8 and Python 3.14, but future releases of those libraries may break it.
 - **Input:** features are range-normalised internally, so these algorithms are not affected by `scale`. They do not accept `NaN` and require dense input (sparse input raises `TypeError`).
+
+### Rough-Set Classifier (Pawlak)
+
+`RoughSetClassifier` implements classic [rough set theory](https://en.wikipedia.org/wiki/Rough_set), introduced by [Zdzisław Pawlak](https://en.wikipedia.org/wiki/Zdzis%C5%82aw_Pawlak) in 1982. It is built in (no extra dependency). Features are discretised into bins; objects in the same bins on a set of attributes are *indiscernible*. A class is described by its **lower approximation** (objects that certainly belong) and **upper approximation** (objects that possibly belong). The classifier:
+
+1. discretises each feature (`n_bins`, `strategy`), inside each CV fold;
+2. finds a **reduct**, a small subset of attributes that preserves the dependency degree (greedy QuickReduct; `reduct_epsilon > 0` allows an approximate reduct, which is more robust to noise);
+3. turns the indiscernibility classes over the reduct into **certain** rules (lower approximation) and **possible** rules (boundary region, used if `use_possible_rules`), dropping rules with support below `min_support`;
+4. predicts by matching the rules, backing off to fewer reduct attributes when nothing matches.
+
+```python
+from optuml import Optimizer
+
+opt = Optimizer(algorithm="RoughSetClassifier", n_trials=50).fit(X, y)
+rs = opt.best_estimator_
+print(rs.reduct_)                                  # selected feature indices
+for rule in rs.describe_rules(feature_names=names, max_rules=5):
+    print(rule)
+# IF petal length (cm) in [5.35, inf) AND ... THEN class=2 [certain, support=6, confidence=1.00]
+```
+
+Its value is interpretability (explicit rules and the selected attributes), not raw accuracy: discretisation loses information, so on continuous data it usually scores below the fuzzy-rough and tree models. Fuzzy-rough methods (`FRNNClassifier`, `FROVOCOClassifier` above) generalise the same lower/upper-approximation idea to graded similarity, which avoids discretisation; Pawlak's model is their special case with all-or-nothing similarity.
 
 ## Advanced Features
 

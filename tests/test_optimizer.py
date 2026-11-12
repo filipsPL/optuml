@@ -1033,3 +1033,54 @@ def test_frlearn_rejects_sparse_input():
     from optuml.optuml import FRNNClassifier
     with pytest.raises(TypeError):
         FRNNClassifier().fit(csr_matrix(np.eye(4)), [0, 1, 0, 1])
+
+
+# ---------------------------------------------------------------------------
+# Classic rough-set classifier
+# ---------------------------------------------------------------------------
+
+def test_rough_set_classifier_basic(classification_data):
+    from optuml.optuml import RoughSetClassifier
+    X_train, X_test, y_train, y_test = classification_data
+    m = RoughSetClassifier().fit(X_train, y_train)
+    assert m.score(X_test, y_test) > 0.8
+    assert 0 < len(m.reduct_) <= X_train.shape[1]
+    assert m.dependency_ <= m.dependency_full_ + 1e-12
+    proba = m.predict_proba(X_test)
+    assert proba.shape == (len(X_test), 3) and np.allclose(proba.sum(axis=1), 1)
+    rules = m.describe_rules(feature_names=["sl", "sw", "pl", "pw"], max_rules=3)
+    assert len(rules) == 3 and rules[0].startswith("IF ") and "THEN class=" in rules[0]
+
+
+def test_rough_set_reduct_finds_the_informative_attribute():
+    from optuml.optuml import RoughSetClassifier
+    rng = np.random.RandomState(0)
+    X = rng.rand(300, 5)
+    y = rng.randint(0, 2, 300)
+    X[:, 3] = np.where(y == 1, 0.8, 0.2) + rng.uniform(-0.1, 0.1, 300)  # only feature 3 matters
+    m = RoughSetClassifier(n_bins=2, strategy="uniform").fit(X, y)
+    assert list(m.reduct_) == [3]
+    assert m.dependency_ == 1.0
+    assert all(r["certain"] for r in m.rules_)
+
+
+def test_rough_set_backoff_inconsistency_and_labels():
+    from sklearn.base import clone
+    from optuml.optuml import RoughSetClassifier
+    X = np.array([[0.0, 0.0], [0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    y = np.array(["a", "b", "b", "b", "a", "b"])  # rows 0/1 are indiscernible but disagree
+    m = clone(RoughSetClassifier(n_bins=2, strategy="uniform")).fit(X, y)
+    assert m.dependency_full_ < 1.0  # inconsistent decision table
+    assert set(m.predict(X)) <= {"a", "b"}
+    # unseen / out-of-range values fall back gracefully instead of crashing
+    assert m.predict_proba(np.array([[5.0, -5.0]])).shape == (1, 2)
+    strict = RoughSetClassifier(n_bins=2, strategy="uniform", use_possible_rules=False).fit(X, y)
+    assert all(r["certain"] for r in strict.rules_)
+
+
+def test_rough_set_via_optimizer(classification_data_binary):
+    X_train, X_test, y_train, y_test = classification_data_binary
+    opt = Optimizer(algorithm="RoughSetClassifier", n_trials=5, random_state=0).fit(X_train, y_train)
+    assert opt.score(X_test, y_test) > 0.85
+    assert set(opt.best_params_) == {"n_bins", "strategy", "reduct_epsilon", "min_support", "use_possible_rules"}
+    assert type(opt.best_estimator_).__name__ == "RoughSetClassifier"  # not scaled

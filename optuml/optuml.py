@@ -6,6 +6,7 @@ A scikit-learn compatible optimizer for automatic hyperparameter tuning
 import optuna
 import numpy as np
 import time
+import warnings
 from typing import Optional, Union
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
@@ -14,6 +15,7 @@ from sklearn.utils.validation import check_is_fitted, check_X_y, check_array
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.model_selection import cross_val_score
 from sklearn.utils.multiclass import unique_labels
+from sklearn.utils.metaestimators import available_if
 
 # Model imports
 from sklearn.svm import SVC, SVR
@@ -50,28 +52,58 @@ try:
 except ImportError:
     LIGHTGBM_AVAILABLE = False
 
+try:
+    import frlearn  # noqa: F401  (fuzzy-rough-learn, optional)
+
+    FRLEARN_AVAILABLE = True
+except ImportError:
+    FRLEARN_AVAILABLE = False
+
 
 def _make_logistic_regression(**kwargs):
     """Create LogisticRegression with sklearn version compatibility.
 
-    sklearn >= 1.8 deprecated 'penalty' in favor of 'l1_ratio' + 'C'.
-    Older sklearn requires 'penalty' and only accepts 'l1_ratio' with
-    penalty='elasticnet'.
+    sklearn >= 1.8 deprecated ``penalty`` (default ``"deprecated"``) in favor of
+    ``l1_ratio`` + ``C``. Older sklearn only honours ``l1_ratio`` when
+    ``penalty="elasticnet"``; passing ``l1_ratio`` alone is accepted but silently
+    ignored (penalty stays "l2"), so the API generation is detected from the
+    default value of ``penalty`` rather than by catching a TypeError.
     """
-    try:
-        # sklearn >= 1.8: use l1_ratio directly, no penalty param
+    if LogisticRegression().penalty == "deprecated":
+        # sklearn >= 1.8: l1_ratio is used directly, no penalty param
         return LogisticRegression(**kwargs)
-    except TypeError:
-        # sklearn < 1.8: translate l1_ratio back to penalty
-        l1_ratio = kwargs.pop("l1_ratio", 0.0)
-        if l1_ratio == 0.0:
-            kwargs["penalty"] = "l2"
-        elif l1_ratio == 1.0:
-            kwargs["penalty"] = "l1"
-        else:
-            kwargs["penalty"] = "elasticnet"
-            kwargs["l1_ratio"] = l1_ratio
-        return LogisticRegression(**kwargs)
+    # sklearn < 1.8: translate l1_ratio back to penalty
+    l1_ratio = kwargs.pop("l1_ratio", 0.0)
+    if l1_ratio == 0.0:
+        kwargs["penalty"] = "l2"
+    elif l1_ratio == 1.0:
+        kwargs["penalty"] = "l1"
+    else:
+        kwargs["penalty"] = "elasticnet"
+        kwargs["l1_ratio"] = l1_ratio
+    return LogisticRegression(**kwargs)
+
+
+def _fitted_estimator_has(method):
+    """available_if check: does the fitted ``best_estimator_`` expose ``method``?
+
+    Before ``fit`` the answer is unknown, so the method is reported as available.
+    This makes ``hasattr(opt, "predict_proba")`` truthful after fitting, so sklearn
+    scorers (roc_auc, ...) and meta-estimators pick a method that actually exists.
+    """
+    def check(self):
+        est = getattr(self, "best_estimator_", None)
+        return True if est is None else hasattr(est, method)
+    return check
+
+
+def _facade_has(method):
+    """available_if check for the ``Optimizer`` facade (classifiers only)."""
+    def check(self):
+        if self._estimator_type != "classifier":
+            return False
+        return _fitted_estimator_has(method)(self._optimizer)
+    return check
 
 
 class _LabelEncodingClassifier(BaseEstimator, ClassifierMixin):
@@ -105,6 +137,125 @@ class _LabelEncodingClassifier(BaseEstimator, ClassifierMixin):
         return self.estimator.predict_proba(X)
 
 
+# ---------------------------------------------------------------------------
+# fuzzy-rough-learn adapters
+# ---------------------------------------------------------------------------
+# frlearn does not follow the sklearn API: ``model = FRNN(...)(X, y)`` builds a
+# model and ``model(X)`` returns per-class membership scores. These thin adapters
+# give it fit/predict/predict_proba plus get_params, so clone, cross_val_score and
+# pipelines work. frlearn range-normalises features internally (RangeNormaliser),
+# so these algorithms are not in _SCALE_SENSITIVE_ALGORITHMS.
+
+_FRLEARN_DISSIMILARITIES = ("boscovich", "euclidean", "chebyshev")
+_FRLEARN_OWA_WEIGHTS = ("linear", "exponential", "reciprocally_linear")
+
+
+def _frlearn_owa_weights(name):
+    """Map an OWA weight-type name to an frlearn weights object."""
+    from frlearn.weights import LinearWeights, ExponentialWeights, ReciprocallyLinearWeights
+    return {"linear": LinearWeights, "exponential": ExponentialWeights,
+            "reciprocally_linear": ReciprocallyLinearWeights}[name]()
+
+
+def _dense(X, name):
+    from scipy.sparse import issparse
+    if issparse(X):
+        raise TypeError(f"{name} (fuzzy-rough-learn) requires dense input.")
+    return np.asarray(X, dtype=float)
+
+
+class _FRClassifierBase(ClassifierMixin, BaseEstimator):
+    """Shared fit/predict for frlearn multiclass classifiers.
+
+    ``predict_proba`` returns the fuzzy-rough membership scores normalised to sum
+    to 1 per row. They rank well (fine for roc_auc) but are not calibrated
+    probabilities, so log-loss / Brier on them should be read with care.
+    """
+
+    def _build(self):  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def fit(self, X, y):
+        X = _dense(X, type(self).__name__)
+        self.classes_, y_idx = np.unique(y, return_inverse=True)
+        self.n_features_in_ = X.shape[1]
+        self.model_ = self._build()(X, y_idx)
+        return self
+
+    def predict_proba(self, X):
+        check_is_fitted(self, "model_")
+        scores = np.asarray(self.model_(_dense(X, type(self).__name__)), dtype=float)
+        scores = np.clip(scores, 0.0, None)
+        total = scores.sum(axis=1, keepdims=True)
+        n_classes = len(self.classes_)
+        return np.where(total > 0, scores / np.where(total > 0, total, 1.0), 1.0 / n_classes)
+
+    def predict(self, X):
+        return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
+
+
+class FRNNClassifier(_FRClassifierBase):
+    """Fuzzy Rough Nearest Neighbour classifier (frlearn ``FRNN``), sklearn API.
+
+    Defaults mirror frlearn: ``upper_k = lower_k = 20`` (frlearn clips k to the
+    class size), linear OWA weights, Boscovich (Manhattan) dissimilarity.
+    """
+
+    def __init__(self, upper_k=20, lower_k=20, weights="linear", dissimilarity="boscovich"):
+        self.upper_k = upper_k
+        self.lower_k = lower_k
+        self.weights = weights
+        self.dissimilarity = dissimilarity
+
+    def _build(self):
+        from frlearn.classifiers import FRNN
+        w = _frlearn_owa_weights(self.weights)
+        return FRNN(upper_weights=w, upper_k=self.upper_k, lower_weights=_frlearn_owa_weights(self.weights),
+                    lower_k=self.lower_k, dissimilarity=self.dissimilarity)
+
+
+class FROVOCOClassifier(_FRClassifierBase):
+    """Fuzzy Rough OVO COmbination classifier (frlearn ``FROVOCO``), sklearn API.
+
+    Designed for imbalanced multiclass data (IFROWANN weighting above
+    ``ir_threshold``). Defaults mirror frlearn: ``balanced_k=16``,
+    ``ir_threshold=9``, Boscovich dissimilarity.
+    """
+
+    def __init__(self, balanced_k=16, ir_threshold=9.0, dissimilarity="boscovich"):
+        self.balanced_k = balanced_k
+        self.ir_threshold = ir_threshold
+        self.dissimilarity = dissimilarity
+
+    def _build(self):
+        from frlearn.classifiers import FROVOCO
+        return FROVOCO(balanced_k=self.balanced_k, ir_threshold=self.ir_threshold,
+                       dissimilarity=self.dissimilarity)
+
+
+class FRNNRegressor(RegressorMixin, BaseEstimator):
+    """Fuzzy Rough Nearest Neighbour regressor (frlearn ``FRNN``), sklearn API.
+
+    Defaults mirror frlearn: ``k=10`` neighbours, Chebyshev dissimilarity.
+    Cost grows quickly with ``k``, so the search keeps it small.
+    """
+
+    def __init__(self, k=10, dissimilarity="chebyshev"):
+        self.k = k
+        self.dissimilarity = dissimilarity
+
+    def fit(self, X, y):
+        from frlearn.regressors import FRNN
+        X = _dense(X, type(self).__name__)
+        self.n_features_in_ = X.shape[1]
+        self.model_ = FRNN(k=self.k, dissimilarity=self.dissimilarity)(X, np.asarray(y, dtype=float))
+        return self
+
+    def predict(self, X):
+        check_is_fitted(self, "model_")
+        return np.asarray(self.model_(_dense(X, type(self).__name__)), dtype=float)
+
+
 # Algorithms whose performance depends materially on feature scaling (distance-based,
 # gradient-based, or regularized-linear models). Tree ensembles, naive Bayes, QDA and
 # plain OLS are scale-invariant for prediction and are intentionally excluded, so
@@ -117,6 +268,30 @@ _SCALE_SENSITIVE_ALGORITHMS = frozenset({
     "SVR", "KNeighborsRegressor", "MLPRegressor", "Ridge", "Lasso", "ElasticNet",
     "SGDRegressor",
 })
+
+
+def _decode_hidden_layers(s):
+    """Decode a string like ``"100-50"`` into a tuple of ints ``(100, 50)``.
+
+    Optuna does not support tuple categorical choices, so MLP architectures are
+    suggested as strings. Tuples/lists are passed through as tuples.
+    """
+    if isinstance(s, (tuple, list)):
+        return tuple(int(v) for v in s)
+    return tuple(int(v) for v in str(s).split("-"))
+
+
+# Algorithms that handle missing values natively; for these, NaN in X is allowed
+# through validation (inf is still rejected). y must always be finite.
+_NAN_TOLERANT_ALGORITHMS = frozenset({
+    "HistGradientBoostingClassifier", "HistGradientBoostingRegressor",
+    "XGBClassifier", "XGBRegressor", "LGBMClassifier", "LGBMRegressor",
+    "CatBoostClassifier", "CatBoostRegressor",
+})
+
+# Regressors whose hyperparameter ranges (epsilon, C, learning rates) assume a
+# unit-scale target; with scale on, y is standardized via TransformedTargetRegressor.
+_TARGET_SCALE_ALGORITHMS = frozenset({"SVR", "MLPRegressor", "SGDRegressor"})
 
 
 def _nested_cv_score(estimator, X, y, scoring, outer_cv, random_state, stratify):
@@ -249,9 +424,50 @@ class OptimizerBase(BaseEstimator):
         if not isinstance(self.cv, int):
             return self.cv
         from sklearn.model_selection import StratifiedKFold, KFold
+        # With random_state=None the seed is drawn once per fit() (see _init_cv_seed),
+        # so every trial is scored on the same folds and trials stay comparable.
+        seed = getattr(self, "_cv_seed_", self.random_state)
         if getattr(self, "_estimator_type", None) == "classifier":
-            return StratifiedKFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
-        return KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
+            return StratifiedKFold(n_splits=self.cv, shuffle=True, random_state=seed)
+        return KFold(n_splits=self.cv, shuffle=True, random_state=seed)
+
+    def _init_cv_seed(self):
+        """Fix the CV shuffling seed for this fit (random if random_state is None)."""
+        if self.random_state is None:
+            self._cv_seed_ = int(np.random.randint(0, 2**31 - 1))
+        else:
+            self._cv_seed_ = self.random_state
+
+    def _finite_arg(self):
+        """Value for sklearn's finite-check kwarg: allow NaN for NaN-native models."""
+        return "allow-nan" if self.algorithm in _NAN_TOLERANT_ALGORITHMS else True
+
+    def _check_X(self, X):
+        """check_array with NaN policy and sklearn-version-compatible kwarg name."""
+        kw = dict(accept_sparse=["csc", "csr"], ensure_2d=True)
+        try:
+            X = check_array(X, ensure_all_finite=self._finite_arg(), **kw)
+        except TypeError:  # sklearn < 1.6
+            X = check_array(X, force_all_finite=self._finite_arg(), **kw)
+        self._check_n_features(X)
+        return X
+
+    def _check_n_features(self, X):
+        """Reject inputs whose column count differs from the one seen in fit()."""
+        expected = getattr(self, "n_features_in_", None)
+        if expected is not None and X.shape[1] != expected:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but {type(self).__name__} is expecting "
+                f"{expected} features as input."
+            )
+
+    def _check_Xy(self, X, y, **extra):
+        """check_X_y with NaN policy and sklearn-version-compatible kwarg name."""
+        kw = dict(accept_sparse=["csc", "csr"], ensure_2d=True, **extra)
+        try:
+            return check_X_y(X, y, ensure_all_finite=self._finite_arg(), **kw)
+        except TypeError:  # sklearn < 1.6
+            return check_X_y(X, y, force_all_finite=self._finite_arg(), **kw)
 
     def _should_scale(self):
         """Whether the current algorithm should be wrapped in a StandardScaler."""
@@ -270,6 +486,11 @@ class OptimizerBase(BaseEstimator):
         """
         if not self._should_scale():
             return model
+        if (getattr(self, "_estimator_type", None) == "regressor"
+                and self.algorithm in _TARGET_SCALE_ALGORITHMS):
+            from sklearn.compose import TransformedTargetRegressor
+            from sklearn.preprocessing import StandardScaler as _YScaler
+            model = TransformedTargetRegressor(regressor=model, transformer=_YScaler())
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import StandardScaler
         from scipy.sparse import issparse
@@ -300,6 +521,12 @@ class OptimizerBase(BaseEstimator):
         if isinstance(self.verbose, int):
             return self.verbose
         return optuna.logging.WARNING
+
+    def _make_sampler(self):
+        """Multivariate, grouped TPE sampler (``group=True`` is experimental: warning silenced)."""
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
+            return optuna.samplers.TPESampler(seed=self.random_state, multivariate=True, group=True)
 
     @staticmethod
     def _resolve_svm_gamma(params):
@@ -437,8 +664,9 @@ class OptimizerBase(BaseEstimator):
 
     def set_params(self, **params):
         """Set parameters for this estimator (sklearn compatibility)"""
+        valid = self.get_params()
         for key, value in params.items():
-            if hasattr(self, key):
+            if key in valid:
                 setattr(self, key, value)
             else:
                 raise ValueError(f"Invalid parameter {key}")
@@ -449,7 +677,7 @@ class OptimizerBase(BaseEstimator):
         return self
 
 
-class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
+class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
     """Optimizer for classification algorithms"""
 
     _estimator_type = "classifier"
@@ -481,6 +709,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             algos.append("XGBClassifier")
         if LIGHTGBM_AVAILABLE:
             algos.append("LGBMClassifier")
+        if FRLEARN_AVAILABLE:
+            algos.extend(["FRNNClassifier", "FROVOCOClassifier"])
         return algos
 
     def __init__(self, algorithm="SVC", scoring="accuracy", **kwargs):
@@ -491,6 +721,12 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             raise ValueError(f"Algorithm {algorithm} not supported. Available: {available}")
 
         super().__init__(algorithm=algorithm, scoring=scoring, **kwargs)
+
+    def _needs_proba(self):
+        """True when the scoring metric needs probabilities (SVC then needs probability=True)."""
+        return isinstance(self.scoring, str) and any(
+            k in self.scoring for k in ("roc_auc", "log_loss", "average_precision", "brier")
+        )
 
     def _objective(self, trial, X, y):
         """Objective function for Optuna optimization"""
@@ -503,9 +739,9 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 # Keep the sklearn defaults ("scale"/"auto") reachable, plus a tunable float.
                 gamma_mode = trial.suggest_categorical("gamma", ["scale", "auto", "value"])
                 gamma = trial.suggest_float("gamma_value", 1e-4, 1e1, log=True) if gamma_mode == "value" else gamma_mode
-                model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=True)
+                model = SVC(C=C, gamma=gamma, kernel=kernel, random_state=self.random_state, probability=self._needs_proba())
             else:
-                model = SVC(C=C, kernel=kernel, random_state=self.random_state, probability=True)
+                model = SVC(C=C, kernel=kernel, random_state=self.random_state, probability=self._needs_proba())
 
         elif self.algorithm == "KNeighborsClassifier":
             n_neighbors = trial.suggest_int("n_neighbors", 1, min(20, len(y) // 2))
@@ -577,7 +813,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 15)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 50)
-            l2_regularization = trial.suggest_float("l2_regularization", 0.0, 10.0)
+            l2_zero = trial.suggest_categorical("l2_zero", [True, False])
+            l2_regularization = 0.0 if l2_zero else trial.suggest_float("l2_regularization", 1e-8, 10.0, log=True)
             model = HistGradientBoostingClassifier(
                 max_iter=max_iter,
                 max_depth=max_depth,
@@ -588,7 +825,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             )
 
         elif self.algorithm == "MLPClassifier":
-            hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 50), (100, 100)])
+            hidden_layer_sizes = _decode_hidden_layers(trial.suggest_categorical("hidden_layer_sizes", ["50", "100", "50-50", "100-50", "100-100"]))
             activation = trial.suggest_categorical("activation", ["tanh", "relu", "logistic"])
             solver = trial.suggest_categorical("solver", ["adam", "sgd", "lbfgs"])
             alpha = trial.suggest_float("alpha", 1e-5, 1e-1, log=True)
@@ -654,7 +891,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
         elif self.algorithm == "LGBMClassifier" and LIGHTGBM_AVAILABLE:
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
-            max_depth = trial.suggest_int("max_depth", 2, 20)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = -1 if max_depth_none else trial.suggest_int("max_depth", 2, 20)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             num_leaves = trial.suggest_int("num_leaves", 15, 127)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
@@ -666,10 +904,12 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 max_depth=max_depth,
                 learning_rate=learning_rate,
                 num_leaves=num_leaves,
+                min_child_samples=trial.suggest_int("min_child_samples", 5, 100),
                 subsample=subsample,
                 colsample_bytree=colsample_bytree,
                 reg_alpha=reg_alpha,
                 reg_lambda=reg_lambda,
+                subsample_freq=1,  # subsample is ignored by LightGBM unless freq > 0
                 random_state=self.random_state,
                 verbosity=-1,
             )
@@ -693,7 +933,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
 
         elif self.algorithm == "XGBClassifier" and XGBOOST_AVAILABLE:
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
-            max_depth = trial.suggest_int("max_depth", 2, 20)
+            max_depth = trial.suggest_int("max_depth", 2, 12)
+            min_child_weight = trial.suggest_float("min_child_weight", 1e-2, 1e2, log=True)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
             colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
@@ -705,6 +946,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             model = _LabelEncodingClassifier(XGBClassifier(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
+                min_child_weight=min_child_weight,
                 learning_rate=learning_rate,
                 subsample=subsample,
                 colsample_bytree=colsample_bytree,
@@ -741,11 +983,29 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 sgd_params["eta0"] = trial.suggest_float("eta0", 1e-4, 1.0, log=True)
             model = SGDClassifier(**sgd_params, tol=1e-3)
 
+        elif self.algorithm == "FRNNClassifier" and FRLEARN_AVAILABLE:
+            # frlearn default: upper_k = lower_k = 20, linear OWA weights, boscovich
+            model = FRNNClassifier(
+                upper_k=trial.suggest_int("upper_k", 1, 50),
+                lower_k=trial.suggest_int("lower_k", 1, 50),
+                weights=trial.suggest_categorical("weights", list(_FRLEARN_OWA_WEIGHTS)),
+                dissimilarity=trial.suggest_categorical("dissimilarity", list(_FRLEARN_DISSIMILARITIES)),
+            )
+
+        elif self.algorithm == "FROVOCOClassifier" and FRLEARN_AVAILABLE:
+            # frlearn default: balanced_k=16, ir_threshold=9, boscovich
+            model = FROVOCOClassifier(
+                balanced_k=trial.suggest_int("balanced_k", 1, 50),
+                ir_threshold=trial.suggest_float("ir_threshold", 1.0, 30.0, log=True),
+                dissimilarity=trial.suggest_categorical("dissimilarity", list(_FRLEARN_DISSIMILARITIES)),
+            )
+
         else:
             raise ValueError(f"Algorithm {self.algorithm} is not implemented")
 
         # Perform cross-validation
         scores = self._cross_val_with_timeout(model, X, y)
+        trial.set_user_attr("cv_std", float(scores.std()))
         return scores.mean()
 
     def fit(self, X, y):
@@ -775,21 +1035,17 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         if hasattr(X, "columns"):
             self.feature_names_in_ = np.array(X.columns)
 
-        # Validate input - handle sklearn version compatibility
-        try:
-            # Try new parameter name first (sklearn >= 1.6)
-            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True)
-        except TypeError:
-            # Fall back to old parameter name (sklearn < 1.6)
-            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], force_all_finite=True, ensure_2d=True)
+        # Validate input (NaN allowed only for NaN-native algorithms)
+        X, y = self._check_Xy(X, y)
 
         # Store feature information
         self.n_features_in_ = X.shape[1]
+        self._init_cv_seed()
 
         # Create and run the study
         start_time = time.time()
 
-        self.study_ = optuna.create_study(direction=self.direction, sampler=optuna.samplers.TPESampler(seed=self.random_state))
+        self.study_ = optuna.create_study(direction=self.direction, sampler=self._make_sampler())
 
         # Add callbacks
         callbacks = []
@@ -832,6 +1088,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         # Store best results
         self.best_params_ = self.study_.best_params
         self.best_score_ = self.study_.best_value
+        self.best_score_std_ = self.study_.best_trial.user_attrs.get("cv_std", float("nan"))
 
         # Create and fit the best estimator (wrapped in the same scaler used during CV,
         # so predictions are made on identically-scaled features).
@@ -873,8 +1130,12 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
             max_depth_none = params.pop("max_depth_none", False)
             if max_depth_none:
                 params.pop("max_depth", None)
+            if params.pop("l2_zero", False):
+                params.pop("l2_regularization", None)
+                params["l2_regularization"] = 0.0
             self.best_estimator_ = HistGradientBoostingClassifier(**params, random_state=self.random_state)
         elif self.algorithm == "MLPClassifier":
+            params["hidden_layer_sizes"] = _decode_hidden_layers(params["hidden_layer_sizes"])
             self.best_estimator_ = MLPClassifier(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
         elif self.algorithm == "GaussianNB":
             self.best_estimator_ = GaussianNB(**params)
@@ -896,16 +1157,23 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 XGBClassifier(**params, random_state=self.random_state, eval_metric="logloss", verbosity=0)
             )
         elif self.algorithm == "LGBMClassifier" and LIGHTGBM_AVAILABLE:
-            self.best_estimator_ = LGBMClassifier(**params, random_state=self.random_state, verbosity=-1)
+            if params.pop("max_depth_none", False):
+                params.pop("max_depth", None)
+                params["max_depth"] = -1
+            self.best_estimator_ = LGBMClassifier(**params, subsample_freq=1, random_state=self.random_state, verbosity=-1)
         elif self.algorithm == "SGDClassifier":
             self.best_estimator_ = SGDClassifier(**params, max_iter=1000, tol=1e-3, random_state=self.random_state)
+        elif self.algorithm == "FRNNClassifier" and FRLEARN_AVAILABLE:
+            self.best_estimator_ = FRNNClassifier(**params)
+        elif self.algorithm == "FROVOCOClassifier" and FRLEARN_AVAILABLE:
+            self.best_estimator_ = FROVOCOClassifier(**params)
         else:
             raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 
     def predict(self, X):
         """Make predictions using the best estimator"""
         check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
-        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        X = self._check_X(X)
         if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
             import warnings as _warnings
             with _warnings.catch_warnings():
@@ -913,10 +1181,11 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 return self.best_estimator_.predict(X)
         return self.best_estimator_.predict(X)
 
+    @available_if(_fitted_estimator_has("predict_proba"))
     def predict_proba(self, X):
         """Predict class probabilities using the best estimator"""
         check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
-        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        X = self._check_X(X)
 
         if not hasattr(self.best_estimator_, "predict_proba"):
             raise AttributeError(f"{self.algorithm} does not support probability predictions")
@@ -928,10 +1197,11 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
                 return self.best_estimator_.predict_proba(X)
         return self.best_estimator_.predict_proba(X)
 
+    @available_if(_fitted_estimator_has("decision_function"))
     def decision_function(self, X):
         """Get decision function values"""
         check_is_fitted(self, ["best_estimator_", "classes_", "n_features_in_"])
-        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        X = self._check_X(X)
 
         if not hasattr(self.best_estimator_, "decision_function"):
             raise AttributeError(f"{self.algorithm} does not have decision_function")
@@ -947,7 +1217,8 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         ``predict``/``predict_proba`` output.
         """
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
-        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True)
+        X, y = self._check_Xy(X, y)
+        self._check_n_features(X)
         if LIGHTGBM_AVAILABLE and self.algorithm == "LGBMClassifier":
             import warnings as _warnings
             with _warnings.catch_warnings():
@@ -956,7 +1227,7 @@ class ClassifierOptimizer(OptimizerBase, ClassifierMixin):
         return self.best_estimator_.score(X, y)
 
 
-class RegressorOptimizer(OptimizerBase, RegressorMixin):
+class RegressorOptimizer(RegressorMixin, OptimizerBase):
     """Optimizer for regression algorithms"""
 
     _estimator_type = "regressor"
@@ -991,6 +1262,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             algos.append("XGBRegressor")
         if LIGHTGBM_AVAILABLE:
             algos.append("LGBMRegressor")
+        if FRLEARN_AVAILABLE:
+            algos.append("FRNNRegressor")
         return algos
 
     def __init__(self, algorithm="SVR", scoring="r2", **kwargs):
@@ -1085,7 +1358,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             max_depth = None if max_depth_none else trial.suggest_int("max_depth", 2, 15)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             min_samples_leaf = trial.suggest_int("min_samples_leaf", 1, 50)
-            l2_regularization = trial.suggest_float("l2_regularization", 0.0, 10.0)
+            l2_zero = trial.suggest_categorical("l2_zero", [True, False])
+            l2_regularization = 0.0 if l2_zero else trial.suggest_float("l2_regularization", 1e-8, 10.0, log=True)
             model = HistGradientBoostingRegressor(
                 max_iter=max_iter,
                 max_depth=max_depth,
@@ -1096,7 +1370,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             )
 
         elif self.algorithm == "MLPRegressor":
-            hidden_layer_sizes = trial.suggest_categorical("hidden_layer_sizes", [(50,), (100,), (50, 50), (100, 50), (100, 100)])
+            hidden_layer_sizes = _decode_hidden_layers(trial.suggest_categorical("hidden_layer_sizes", ["50", "100", "50-50", "100-50", "100-100"]))
             activation = trial.suggest_categorical("activation", ["tanh", "relu", "logistic"])
             solver = trial.suggest_categorical("solver", ["adam", "sgd", "lbfgs"])
             alpha = trial.suggest_float("alpha", 1e-5, 1e-1, log=True)
@@ -1149,7 +1423,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
 
         elif self.algorithm == "LGBMRegressor" and LIGHTGBM_AVAILABLE:
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
-            max_depth = trial.suggest_int("max_depth", 2, 20)
+            max_depth_none = trial.suggest_categorical("max_depth_none", [True, False])
+            max_depth = -1 if max_depth_none else trial.suggest_int("max_depth", 2, 20)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             num_leaves = trial.suggest_int("num_leaves", 15, 127)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
@@ -1161,10 +1436,12 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
                 max_depth=max_depth,
                 learning_rate=learning_rate,
                 num_leaves=num_leaves,
+                min_child_samples=trial.suggest_int("min_child_samples", 5, 100),
                 subsample=subsample,
                 colsample_bytree=colsample_bytree,
                 reg_alpha=reg_alpha,
                 reg_lambda=reg_lambda,
+                subsample_freq=1,  # subsample is ignored by LightGBM unless freq > 0
                 random_state=self.random_state,
                 verbosity=-1,
             )
@@ -1188,7 +1465,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
 
         elif self.algorithm == "XGBRegressor" and XGBOOST_AVAILABLE:
             n_estimators = trial.suggest_int("n_estimators", 50, 500)
-            max_depth = trial.suggest_int("max_depth", 2, 20)
+            max_depth = trial.suggest_int("max_depth", 2, 12)
+            min_child_weight = trial.suggest_float("min_child_weight", 1e-2, 1e2, log=True)
             learning_rate = trial.suggest_float("learning_rate", 1e-3, 0.5, log=True)
             subsample = trial.suggest_float("subsample", 0.5, 1.0)
             colsample_bytree = trial.suggest_float("colsample_bytree", 0.5, 1.0)
@@ -1198,6 +1476,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             model = XGBRegressor(
                 n_estimators=n_estimators,
                 max_depth=max_depth,
+                min_child_weight=min_child_weight,
                 learning_rate=learning_rate,
                 subsample=subsample,
                 colsample_bytree=colsample_bytree,
@@ -1236,11 +1515,19 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
                 sgd_params["eta0"] = trial.suggest_float("eta0", 1e-4, 1.0, log=True)
             model = SGDRegressor(**sgd_params, tol=1e-3)
 
+        elif self.algorithm == "FRNNRegressor" and FRLEARN_AVAILABLE:
+            # frlearn default: k=10, chebyshev
+            model = FRNNRegressor(
+                k=trial.suggest_int("k", 1, 30),
+                dissimilarity=trial.suggest_categorical("dissimilarity", list(_FRLEARN_DISSIMILARITIES)),
+            )
+
         else:
             raise ValueError(f"Algorithm {self.algorithm} is not implemented")
 
         # Perform cross-validation
         scores = self._cross_val_with_timeout(model, X, y)
+        trial.set_user_attr("cv_std", float(scores.std()))
         return scores.mean()
 
     def fit(self, X, y):
@@ -1270,21 +1557,17 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         if hasattr(X, "columns"):
             self.feature_names_in_ = np.array(X.columns)
 
-        # Validate input - handle sklearn version compatibility
-        try:
-            # Try new parameter name first (sklearn >= 1.6)
-            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_all_finite=True, ensure_2d=True, y_numeric=True)
-        except TypeError:
-            # Fall back to old parameter name (sklearn < 1.6)
-            X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], force_all_finite=True, ensure_2d=True, y_numeric=True)
+        # Validate input (NaN allowed only for NaN-native algorithms)
+        X, y = self._check_Xy(X, y, y_numeric=True)
 
         # Store feature information
         self.n_features_in_ = X.shape[1]
+        self._init_cv_seed()
 
         # Create and run the study
         start_time = time.time()
 
-        self.study_ = optuna.create_study(direction=self.direction, sampler=optuna.samplers.TPESampler(seed=self.random_state))
+        self.study_ = optuna.create_study(direction=self.direction, sampler=self._make_sampler())
 
         # Add callbacks
         callbacks = []
@@ -1330,6 +1613,7 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         # Store best results
         self.best_params_ = self.study_.best_params
         self.best_score_ = self.study_.best_value
+        self.best_score_std_ = self.study_.best_trial.user_attrs.get("cv_std", float("nan"))
 
         # Create and fit the best estimator (wrapped in the same scaler used during CV,
         # so predictions are made on identically-scaled features).
@@ -1369,8 +1653,12 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
             max_depth_none = params.pop("max_depth_none", False)
             if max_depth_none:
                 params.pop("max_depth", None)
+            if params.pop("l2_zero", False):
+                params.pop("l2_regularization", None)
+                params["l2_regularization"] = 0.0
             self.best_estimator_ = HistGradientBoostingRegressor(**params, random_state=self.random_state)
         elif self.algorithm == "MLPRegressor":
+            params["hidden_layer_sizes"] = _decode_hidden_layers(params["hidden_layer_sizes"])
             self.best_estimator_ = MLPRegressor(**params, random_state=self.random_state, max_iter=1000, early_stopping=True)
         elif self.algorithm == "LinearRegression":
             self.best_estimator_ = LinearRegression(**params)
@@ -1390,16 +1678,21 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         elif self.algorithm == "XGBRegressor" and XGBOOST_AVAILABLE:
             self.best_estimator_ = XGBRegressor(**params, random_state=self.random_state, verbosity=0)
         elif self.algorithm == "LGBMRegressor" and LIGHTGBM_AVAILABLE:
-            self.best_estimator_ = LGBMRegressor(**params, random_state=self.random_state, verbosity=-1)
+            if params.pop("max_depth_none", False):
+                params.pop("max_depth", None)
+                params["max_depth"] = -1
+            self.best_estimator_ = LGBMRegressor(**params, subsample_freq=1, random_state=self.random_state, verbosity=-1)
         elif self.algorithm == "SGDRegressor":
             self.best_estimator_ = SGDRegressor(**params, max_iter=1000, tol=1e-3, random_state=self.random_state)
+        elif self.algorithm == "FRNNRegressor" and FRLEARN_AVAILABLE:
+            self.best_estimator_ = FRNNRegressor(**params)
         else:
             raise ValueError(f"Cannot create estimator: algorithm '{self.algorithm}' is not available.")
 
     def predict(self, X):
         """Make predictions using the best estimator"""
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
-        X = check_array(X, accept_sparse=["csc", "csr"], ensure_2d=True)
+        X = self._check_X(X)
         if LIGHTGBM_AVAILABLE and self.algorithm in ("LGBMClassifier", "LGBMRegressor"):
             import warnings as _warnings
             with _warnings.catch_warnings():
@@ -1416,7 +1709,8 @@ class RegressorOptimizer(OptimizerBase, RegressorMixin):
         ``predict`` output.
         """
         check_is_fitted(self, ["best_estimator_", "n_features_in_"])
-        X, y = check_X_y(X, y, accept_sparse=["csc", "csr"], ensure_2d=True, y_numeric=True)
+        X, y = self._check_Xy(X, y, y_numeric=True)
+        self._check_n_features(X)
         if LIGHTGBM_AVAILABLE and self.algorithm == "LGBMRegressor":
             import warnings as _warnings
             with _warnings.catch_warnings():
@@ -1506,7 +1800,10 @@ class Optimizer(BaseEstimator):
 
         self.algorithm = algorithm
 
-        # Auto-select scoring if not provided
+        # Auto-select scoring for the inner optimizer. ``self.scoring`` keeps the raw
+        # user value (possibly None) so get_params/clone/set_params round-trip and
+        # an auto-selected metric is re-resolved when ``algorithm`` changes.
+        raw_scoring = scoring
         if scoring is None:
             if algorithm in self._get_classifier_algorithms():
                 scoring = "accuracy"
@@ -1556,12 +1853,26 @@ class Optimizer(BaseEstimator):
         self.n_trials = n_trials
         self.timeout = timeout
         self.cv = cv
-        self.scoring = scoring
+        self.scoring = raw_scoring
         self.cv_timeout = cv_timeout
         self.random_state = random_state
         self.early_stopping_patience = early_stopping_patience
         self.n_jobs = n_jobs
         self.scale = scale
+
+    def __sklearn_tags__(self):
+        """Expose the estimator type of the wrapped optimizer (sklearn >= 1.6).
+
+        sklearn >= 1.6 reads the type from tags, not from ``_estimator_type``, so
+        without this ``is_classifier(Optimizer("SVC"))`` is False and scorers such
+        as ``roc_auc`` / stratified CV are not applied correctly.
+        """
+        tags = super().__sklearn_tags__()
+        inner = self._optimizer.__sklearn_tags__()
+        tags.estimator_type = inner.estimator_type
+        tags.classifier_tags = inner.classifier_tags
+        tags.regressor_tags = inner.regressor_tags
+        return tags
 
     def fit(self, X, y):
         """Fit the optimizer"""
@@ -1571,6 +1882,7 @@ class Optimizer(BaseEstimator):
         self.best_params_ = self._optimizer.best_params_
         self.best_estimator_ = self._optimizer.best_estimator_
         self.best_score_ = self._optimizer.best_score_
+        self.best_score_std_ = self._optimizer.best_score_std_
         self.study_time_ = self._optimizer.study_time_
         self.study_ = self._optimizer.study_
         self.n_trials_completed_ = self._optimizer.n_trials_completed_
@@ -1590,16 +1902,14 @@ class Optimizer(BaseEstimator):
         """Make predictions"""
         return self._optimizer.predict(X)
 
+    @available_if(_facade_has("predict_proba"))
     def predict_proba(self, X):
         """Get probability estimates (classifiers only)"""
-        if self._estimator_type != "classifier":
-            raise AttributeError(f"{self.algorithm} does not support probability predictions. " "This method is only available for classifiers.")
         return self._optimizer.predict_proba(X)
 
+    @available_if(_facade_has("decision_function"))
     def decision_function(self, X):
         """Get decision function values (some classifiers only)"""
-        if self._estimator_type != "classifier":
-            raise AttributeError(f"{self.algorithm} does not have decision_function. " "This method is only available for some classifiers.")
         return self._optimizer.decision_function(X)
 
     def score(self, X, y):
@@ -1644,19 +1954,19 @@ class Optimizer(BaseEstimator):
             # previously set values (n_trials, cv, etc.) are preserved.
             # Reset scoring to None so auto-selection fires for the new algorithm
             # unless the caller explicitly provided a scoring value.
-            current = self.get_params()
-            current.pop("scoring")  # let __init__ auto-select unless overridden
+            current = self.get_params()  # scoring is the raw user value (None = auto)
             current.update(params)
             self.__init__(**current)
         else:
             # Update existing parameters on both this object and the internal optimizer.
+            valid = self.get_params()
             for key, value in params.items():
-                if hasattr(self, key):
-                    setattr(self, key, value)
-                else:
+                if key not in valid:
                     raise ValueError(f"Invalid parameter '{key}' for estimator {type(self).__name__}.")
-                if hasattr(self._optimizer, key):
-                    setattr(self._optimizer, key, value)
+                setattr(self, key, value)
+                if key == "scoring" and value is None:
+                    value = "accuracy" if self._estimator_type == "classifier" else "r2"
+                setattr(self._optimizer, key, value)
 
             # Re-validate parameters in the internal optimizer.
             self._optimizer._validate_params()

@@ -46,7 +46,7 @@ Two design choices support that fairness: scale-sensitive algorithms (SVM, KNN, 
 
 ## Key Features
 
-- **Comprehensive Algorithm Support**: Full scikit-learn algorithm zoo plus CatBoost and XGBoost
+- **Comprehensive Algorithm Support**: Full scikit-learn algorithm zoo plus optional CatBoost, XGBoost, LightGBM and fuzzy-rough-learn (FRNN, FROVOCO)
 - **Full Scikit-learn Compatibility**: Seamless integration with pipelines, cross-validation, and all sklearn tools
 - **Robust Optimization**: Powered by Optuna with early stopping, timeout protection, and parallel execution
 - **Type-Safe Design**: Separate optimizers for classification and regression with proper type checking
@@ -65,10 +65,11 @@ pip install optuml
 With optional algorithm support:
 
 ```bash
-pip install optuml[all]          # CatBoost + XGBoost + LightGBM
+pip install optuml[all]          # CatBoost + XGBoost + LightGBM + fuzzy-rough-learn
 pip install optuml[catboost]     # CatBoost only
 pip install optuml[xgboost]      # XGBoost only
 pip install optuml[lightgbm]     # LightGBM only
+pip install optuml[frlearn]      # fuzzy-rough-learn only (FRNN / FROVOCO)
 ```
 
 or upgrade:
@@ -84,7 +85,7 @@ pip install optuml --upgrade
 pip install optuna scikit-learn numpy
 
 # Optional: Install additional algorithms
-pip install catboost xgboost
+pip install catboost xgboost fuzzy-rough-learn
 
 # Download the module
 wget https://raw.githubusercontent.com/filipsPL/optuml/main/optuml/optuml.py
@@ -179,6 +180,8 @@ print(f"R² Score: {r2:.3f}")
 | `CatBoostClassifier`*            | CatBoost                        | Categorical features, GPU support         |
 | `XGBClassifier`*                 | XGBoost                         | Regularization, missing values            |
 | `LGBMClassifier`*                | LightGBM                        | Fast GBDT, leaf-wise growth               |
+| `FRNNClassifier`*                | Fuzzy Rough Nearest Neighbour   | OWA-weighted fuzzy-rough k-NN             |
+| `FROVOCOClassifier`*             | Fuzzy Rough OVO Combination     | Imbalanced multiclass (one-vs-one)        |
 
 ### Regression Algorithms
 
@@ -201,8 +204,25 @@ print(f"R² Score: {r2:.3f}")
 | `CatBoostRegressor`*            | CatBoost                    | Handles categoricals                     |
 | `XGBRegressor`*                 | XGBoost                     | High performance                         |
 | `LGBMRegressor`*                | LightGBM                    | Fast GBDT, leaf-wise growth              |
+| `FRNNRegressor`*                | Fuzzy-rough k-NN            | Fuzzy-rough local regression             |
 
 *Optional dependencies (install separately)
+
+### Fuzzy-Rough Algorithms (`fuzzy-rough-learn`)
+
+`FRNNClassifier`, `FROVOCOClassifier` and `FRNNRegressor` come from the [`fuzzy-rough-learn`](https://pypi.org/project/fuzzy-rough-learn/) package (import name `frlearn`). Install it with `pip install optuml[frlearn]` or `pip install fuzzy-rough-learn`; they are listed only when it is installed.
+
+```python
+from optuml import Optimizer
+
+optimizer = Optimizer(algorithm="FROVOCOClassifier", n_trials=50).fit(X, y)
+```
+
+Caveats:
+
+- **`predict_proba` is not calibrated.** It returns fuzzy-rough membership scores, clipped at 0 and normalised per row. They rank classes well (fine for `roc_auc`), but they are not probabilities, so do not use them for thresholding or log-loss. These classifiers have no `decision_function`.
+- **Upstream is unmaintained.** The last `fuzzy-rough-learn` release is 0.2.2 (June 2022). It has worked with NumPy 2.4, scikit-learn 1.8 and Python 3.14, but future releases of those libraries may break it.
+- **Input:** features are range-normalised internally, so these algorithms are not affected by `scale`. They do not accept `NaN` and require dense input (sparse input raises `TypeError`).
 
 ## Advanced Features
 
@@ -259,6 +279,10 @@ Optimizer(algorithm="SVC", scale=False)   # never standardize
 ```
 
 The scaler is fit **inside each cross-validation fold** (and on the final training data), so no information leaks from validation folds. When scaling applies, `best_estimator_` is a `Pipeline([("scaler", StandardScaler()), ("model", ...)])`. Sparse input keeps its sparsity (`with_mean=False`).
+
+For `SVR`, `MLPRegressor` and `SGDRegressor` the target is standardized as well (the model is wrapped in a `TransformedTargetRegressor`, so `best_estimator_.named_steps["model"]` is that wrapper and predictions are returned on the original scale). Their `epsilon`/`C`/learning-rate ranges assume a unit-scale target.
+
+Missing values: `HistGradientBoosting*`, `XGB*`, `LGBM*` and `CatBoost*` accept `NaN` in `X` (they handle it natively); all other algorithms still reject it.
 
 ### Unbiased Evaluation (Nested Cross-Validation)
 
@@ -518,12 +542,12 @@ Specialized optimizer for regression algorithms with appropriate default scoring
 optimizer = Optimizer(algorithm="SVC", cv_timeout=300, cv=3)
 ```
 
-### Issue: CatBoost/XGBoost/LightGBM not available
+### Issue: CatBoost/XGBoost/LightGBM/fuzzy-rough-learn not available
 **Solution**: Install optional dependencies:
 ```bash
 pip install optuml[all]
 # or individually:
-pip install catboost xgboost lightgbm
+pip install catboost xgboost lightgbm fuzzy-rough-learn
 ```
 
 ### Issue: Optimization takes too long

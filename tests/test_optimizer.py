@@ -796,3 +796,240 @@ def test_xgb_accepts_noncontiguous_int_labels(classification_data):
     assert set(np.unique(preds)).issubset({1, 2, 3})
     score = opt.score(X_test, y_test + 1)
     assert 0 <= score <= 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the science/compat review fixes
+# ---------------------------------------------------------------------------
+
+def test_facade_is_recognised_as_classifier_or_regressor():
+    """sklearn >= 1.6 reads the estimator type from tags, not _estimator_type."""
+    from sklearn.base import is_classifier, is_regressor
+    from optuml.optuml import ClassifierOptimizer, RegressorOptimizer
+    assert is_classifier(Optimizer(algorithm="SVC"))
+    assert is_regressor(Optimizer(algorithm="SVR"))
+    assert not is_regressor(Optimizer(algorithm="SVC"))
+    assert is_classifier(ClassifierOptimizer(algorithm="GaussianNB"))
+    assert is_regressor(RegressorOptimizer(algorithm="Ridge"))
+
+
+def test_roc_auc_scoring_through_cross_val_score(classification_data_binary):
+    """roc_auc used to silently return NaN (decision_function probed first)."""
+    from sklearn.model_selection import cross_val_score
+    X_train, _, y_train, _ = classification_data_binary
+    opt = Optimizer(algorithm="GaussianNB", n_trials=3, random_state=0)
+    scores = cross_val_score(opt, X_train, y_train, cv=3, scoring="roc_auc", error_score="raise")
+    assert np.all(scores > 0.9)
+
+
+def test_hasattr_reflects_real_method_availability(classification_data):
+    X_train, _, y_train, _ = classification_data
+    assert not hasattr(Optimizer(algorithm="SVR"), "predict_proba")
+    assert not hasattr(Optimizer(algorithm="SVR"), "decision_function")
+    ridge = Optimizer(algorithm="RidgeClassifier", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert not hasattr(ridge, "predict_proba")
+    assert hasattr(ridge, "decision_function")
+    nb = Optimizer(algorithm="GaussianNB", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert hasattr(nb, "predict_proba")
+    assert not hasattr(nb, "decision_function")
+
+
+def test_logistic_regression_saga_uses_l1_ratio():
+    """l1_ratio must actually take effect on every supported sklearn version."""
+    from optuml.optuml import _make_logistic_regression
+    m = _make_logistic_regression(C=1.0, l1_ratio=0.5, solver="saga", max_iter=10)
+    assert m.l1_ratio == 0.5
+    if getattr(m, "penalty", "deprecated") != "deprecated":
+        assert m.penalty == "elasticnet"
+
+
+def test_scoring_survives_clone_and_algorithm_change():
+    from sklearn.base import clone
+    # Auto-selected scoring is re-resolved when algorithm switches task type.
+    auto = clone(Optimizer(algorithm="SVC")).set_params(algorithm="SVR")
+    assert auto._optimizer.scoring == "r2"
+    # Explicit scoring is preserved across clone + algorithm change.
+    explicit = clone(Optimizer(algorithm="SVC", scoring="f1_macro")).set_params(algorithm="RandomForestClassifier")
+    assert explicit.scoring == "f1_macro"
+    assert explicit._optimizer.scoring == "f1_macro"
+    # Raw value round-trips through get_params.
+    assert Optimizer(algorithm="SVC").get_params()["scoring"] is None
+    # Setting scoring=None re-resolves the inner default.
+    o = Optimizer(algorithm="SVC", scoring="f1_macro").set_params(scoring=None)
+    assert o._optimizer.scoring == "accuracy"
+
+
+def test_cv_folds_identical_across_trials_when_unseeded():
+    """random_state=None used to reshuffle folds for every trial."""
+    from optuml.optuml import ClassifierOptimizer
+    X, y = load_iris(return_X_y=True)
+    opt = ClassifierOptimizer(algorithm="GaussianNB", random_state=None)
+    opt._init_cv_seed()
+    a = [te.tolist() for _, te in opt._make_cv().split(X, y)]
+    b = [te.tolist() for _, te in opt._make_cv().split(X, y)]
+    assert a == b
+
+
+def test_set_params_rejects_non_parameters():
+    from optuml.optuml import ClassifierOptimizer
+    with pytest.raises(ValueError):
+        ClassifierOptimizer(algorithm="GaussianNB").set_params(fit=1)
+    with pytest.raises(ValueError):
+        Optimizer(algorithm="SVC").set_params(predict=1)
+
+
+def test_lightgbm_subsample_is_effective(classification_data_binary):
+    pytest.importorskip("lightgbm")
+    X_train, _, y_train, _ = classification_data_binary
+    opt = Optimizer(algorithm="LGBMClassifier", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert opt.best_estimator_.get_params()["subsample_freq"] == 1
+
+
+def _unwrap(est):
+    return est.named_steps["model"] if hasattr(est, "named_steps") and "model" in est.named_steps else est
+
+
+def test_mlp_hidden_layers_string_choices(classification_data):
+    X_train, _, y_train, _ = classification_data
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        opt = Optimizer(algorithm="MLPClassifier", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert not any("Choices for a categorical distribution" in str(w.message) for w in caught)
+    hls = _unwrap(opt.best_estimator_).hidden_layer_sizes
+    assert isinstance(hls, tuple) and all(isinstance(v, int) for v in hls)
+
+
+def test_svc_probability_policy(classification_data_binary):
+    from optuml.optuml import ClassifierOptimizer
+    assert ClassifierOptimizer(algorithm="SVC", scoring="accuracy")._needs_proba() is False
+    assert ClassifierOptimizer(algorithm="SVC", scoring="roc_auc")._needs_proba() is True
+    X_train, X_test, y_train, _ = classification_data_binary
+    opt = Optimizer(algorithm="SVC", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert opt.predict_proba(X_test).shape == (len(X_test), 2)
+
+
+def test_cv_std_recorded(classification_data):
+    X_train, _, y_train, _ = classification_data
+    opt = Optimizer(algorithm="GaussianNB", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert opt.best_score_std_ >= 0
+    assert "cv_std" in opt.study_.best_trial.user_attrs
+
+
+def test_multivariate_tpe_sampler(classification_data):
+    import optuna
+    X_train, _, y_train, _ = classification_data
+    opt = Optimizer(algorithm="GaussianNB", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert isinstance(opt.study_.sampler, optuna.samplers.TPESampler)
+
+
+@pytest.mark.parametrize("algo,pkg", [
+    ("LGBMClassifier", "lightgbm"), ("LGBMRegressor", "lightgbm"),
+    ("XGBClassifier", "xgboost"), ("XGBRegressor", "xgboost"),
+    ("HistGradientBoostingClassifier", None), ("HistGradientBoostingRegressor", None),
+])
+def test_search_space_sentinels_do_not_leak(algo, pkg, classification_data, regression_data):
+    if pkg:
+        pytest.importorskip(pkg)
+    X_train, X_test, y_train, _ = classification_data if "Classifier" in algo else regression_data
+    opt = Optimizer(algorithm=algo, n_trials=3, random_state=0).fit(X_train, y_train)
+    assert len(opt.predict(X_test)) == len(X_test)
+    keys = set(_unwrap(opt.best_estimator_).get_params())
+    assert "max_depth_none" not in keys and "l2_zero" not in keys
+
+
+def test_nan_allowed_only_for_nan_native_algorithms(classification_data_binary):
+    X_train, X_test, y_train, y_test = classification_data_binary
+    Xn = X_train.copy()
+    Xn[::7, 3] = np.nan
+    opt = Optimizer(algorithm="HistGradientBoostingClassifier", n_trials=2, random_state=0).fit(Xn, y_train)
+    Xt = X_test.copy()
+    Xt[0, 0] = np.nan
+    assert opt.predict(Xt).shape == (len(X_test),)
+    with pytest.raises(ValueError):
+        Optimizer(algorithm="RandomForestClassifier", n_trials=2).fit(Xn, y_train)
+    # inf is still rejected everywhere
+    Xi = X_train.copy()
+    Xi[0, 0] = np.inf
+    with pytest.raises(ValueError):
+        Optimizer(algorithm="HistGradientBoostingClassifier", n_trials=2).fit(Xi, y_train)
+
+
+def test_target_scaling_for_scale_sensitive_regressors(regression_data):
+    from sklearn.compose import TransformedTargetRegressor
+    X_train, X_test, y_train, y_test = regression_data
+    opt = Optimizer(algorithm="SVR", n_trials=8, random_state=0).fit(X_train, y_train)
+    assert isinstance(opt.best_estimator_.named_steps["model"], TransformedTargetRegressor)
+    assert opt.score(X_test, y_test) > 0.3
+    # predictions are returned on the original target scale
+    assert abs(np.mean(opt.predict(X_test)) - np.mean(y_train)) < np.std(y_train)
+    off = Optimizer(algorithm="SVR", n_trials=2, random_state=0, scale=False).fit(X_train, y_train)
+    assert not isinstance(off.best_estimator_, TransformedTargetRegressor)
+    tree = Optimizer(algorithm="DecisionTreeRegressor", n_trials=2, random_state=0).fit(X_train, y_train)
+    assert not isinstance(tree.best_estimator_, TransformedTargetRegressor)
+
+
+def test_wrong_feature_count_rejected_and_refit_allowed(classification_data):
+    X_train, X_test, y_train, _ = classification_data
+    opt = Optimizer(algorithm="GaussianNB", n_trials=2, random_state=0).fit(X_train, y_train)
+    with pytest.raises(ValueError):
+        opt.predict(X_test[:, :2])
+    with pytest.raises(ValueError):
+        opt.score(X_test[:, :2], np.zeros(len(X_test)))
+    # refitting on a different number of features must work
+    opt.fit(X_train[:, :2], y_train)
+    assert opt.predict(X_test[:, :2]).shape == (len(X_test),)
+
+
+# ---------------------------------------------------------------------------
+# fuzzy-rough-learn (optional)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("algorithm", ["FRNNClassifier", "FROVOCOClassifier"])
+def test_frlearn_classifiers(algorithm, classification_data_binary):
+    pytest.importorskip("frlearn")
+    X_train, X_test, y_train, y_test = classification_data_binary
+    opt = Optimizer(algorithm=algorithm, n_trials=4, random_state=0).fit(X_train, y_train)
+    assert opt.score(X_test, y_test) > 0.85
+    proba = opt.predict_proba(X_test)
+    assert proba.shape == (len(X_test), 2)
+    assert np.allclose(proba.sum(axis=1), 1)
+    assert not hasattr(opt, "decision_function")
+    # frlearn normalises feature ranges itself: no StandardScaler wrapper
+    assert type(opt.best_estimator_).__name__ == algorithm
+
+
+def test_frlearn_classifier_string_labels_and_clone(classification_data):
+    pytest.importorskip("frlearn")
+    from sklearn.base import clone
+    from optuml.optuml import FRNNClassifier
+    X_train, X_test, y_train, _ = classification_data
+    labels = np.array(["setosa", "versicolor", "virginica"])
+    est = clone(FRNNClassifier(upper_k=5, weights="exponential")).fit(X_train, labels[y_train])
+    assert est.get_params()["upper_k"] == 5
+    assert set(est.predict(X_test)).issubset(set(labels))
+    assert list(est.classes_) == list(labels)
+
+
+def test_frlearn_roc_auc_cross_val(classification_data_binary):
+    pytest.importorskip("frlearn")
+    from sklearn.model_selection import cross_val_score
+    X_train, _, y_train, _ = classification_data_binary
+    scores = cross_val_score(Optimizer(algorithm="FRNNClassifier", n_trials=2, random_state=0),
+                             X_train, y_train, cv=3, scoring="roc_auc", error_score="raise")
+    assert np.all(scores > 0.9)
+
+
+def test_frlearn_regressor(regression_data):
+    pytest.importorskip("frlearn")
+    X_train, X_test, y_train, y_test = regression_data
+    opt = Optimizer(algorithm="FRNNRegressor", n_trials=4, random_state=0).fit(X_train, y_train)
+    assert opt.score(X_test, y_test) > 0.2
+    assert set(opt.best_params_) <= {"k", "dissimilarity"}
+
+
+def test_frlearn_rejects_sparse_input():
+    pytest.importorskip("frlearn")
+    from scipy.sparse import csr_matrix
+    from optuml.optuml import FRNNClassifier
+    with pytest.raises(TypeError):
+        FRNNClassifier().fit(csr_matrix(np.eye(4)), [0, 1, 0, 1])

@@ -1,13 +1,24 @@
 """
 OptuML Benchmark: Compare default vs optimized hyperparameters.
 
-Runs benchmarks and saves results to CSV. To generate plots and markdown:
+Runs benchmarks and saves two CSVs to ``benchmark/results/``:
+
+- ``benchmark_results.csv``: one row per (dataset, algorithm) with default /
+  quick / full CV and test scores.
+- ``benchmark_trials.csv``: the per-trial trajectory of the full run (CV score
+  of every trial plus the best-so-far value), used to plot how much the
+  optimization gains over the default hyperparameters as trials accumulate.
+
+To generate plots and markdown:
     python benchmark/benchmark-plot.py
 
 Usage:
     python benchmark/benchmark.py
+    python benchmark/benchmark.py --datasets Iris Friedman1 --algorithms SVC SVR \
+        --quick-trials 5 --full-trials 10 --output-dir /tmp/bench     # smoke run
 """
 
+import argparse
 import csv
 import os
 import sys
@@ -15,7 +26,9 @@ import time
 import warnings
 import numpy as np
 import optuna
-from sklearn.datasets import load_iris, load_wine, load_diabetes, load_breast_cancer
+from sklearn.datasets import (
+    load_iris, load_wine, load_diabetes, load_breast_cancer, make_classification, make_friedman1,
+)
 from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, KFold
 
 # Default-parameter estimator classes
@@ -90,14 +103,33 @@ PER_ALGO_TIMEOUT = 60  # seconds per optimization run
 
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "results")
 
+
+
+def _load_synthetic_classification(return_X_y=True):
+    """Harder classification task: Iris/Wine/Breast Cancer are near-saturated
+    (accuracy ~0.95-1.0 with defaults), which leaves little room to show tuning
+    gains. Label noise, overlapping classes and uninformative features do."""
+    return make_classification(
+        n_samples=600, n_features=20, n_informative=6, n_redundant=4, n_classes=3,
+        n_clusters_per_class=2, class_sep=0.8, flip_y=0.05, random_state=RANDOM_STATE,
+    )
+
+
+def _load_friedman1(return_X_y=True):
+    """Non-linear regression (Friedman #1) with 5 noise features; offline and deterministic."""
+    return make_friedman1(n_samples=500, n_features=10, noise=1.0, random_state=RANDOM_STATE)
+
+
 CLASSIFICATION_DATASETS = {
     "Iris": load_iris,
     "Wine": load_wine,
     "Breast Cancer": load_breast_cancer,
+    "Synthetic 3-class": _load_synthetic_classification,
 }
 
 REGRESSION_DATASETS = {
     "Diabetes": load_diabetes,
+    "Friedman1": _load_friedman1,
 }
 
 # The benchmarked algorithms are whatever OptuML supports in this environment
@@ -226,7 +258,35 @@ def score_optuml(algorithm, X_train, y_train, X_test, y_test, scoring, cv, n_tri
     opt.fit(X_train, y_train)
     test_score = opt.score(X_test, y_test)
     elapsed = time.time() - t0
-    return opt.best_score_, test_score, elapsed, opt.best_params_
+    return opt.best_score_, test_score, elapsed, opt.study_
+
+
+def study_trajectory(study):
+    """Per-trial rows: trial number, CV value (NaN if the trial failed / was pruned),
+    best-so-far CV value and seconds since the study started."""
+    trials = sorted(study.trials, key=lambda t: t.number)
+    starts = [t.datetime_start for t in trials if t.datetime_start is not None]
+    t_start = min(starts) if starts else None
+    maximize = study.direction == optuna.study.StudyDirection.MAXIMIZE
+    best = float("nan")
+    rows = []
+    for t in trials:
+        complete = t.state == optuna.trial.TrialState.COMPLETE and t.value is not None
+        value = float(t.value) if complete else float("nan")
+        if complete and (np.isnan(best) or (value > best if maximize else value < best)):
+            best = value
+        elapsed = (
+            (t.datetime_complete - t_start).total_seconds()
+            if t.datetime_complete is not None and t_start is not None else float("nan")
+        )
+        rows.append({
+            "trial": t.number + 1,
+            "state": t.state.name,
+            "value": value,
+            "best_so_far": best,
+            "elapsed_s": elapsed,
+        })
+    return rows
 
 
 def run_algo(algo_name, task, X_train, y_train, X_test, y_test, scoring):
@@ -249,11 +309,14 @@ def run_algo(algo_name, task, X_train, y_train, X_test, y_test, scoring):
         sys.stdout.write(f"[quick failed: {e}] ")
 
     # OptuML full
+    trajectory = []
     try:
-        full_cv, full_test, full_time, _ = score_optuml(algo_name, X_train, y_train, X_test, y_test, scoring, CV_FOLDS, FULL_TRIALS)
+        full_cv, full_test, full_time, study = score_optuml(algo_name, X_train, y_train, X_test, y_test, scoring, CV_FOLDS, FULL_TRIALS)
+        trajectory = study_trajectory(study)
     except Exception as e:
         full_cv, full_test, full_time = float("nan"), float("nan"), 0.0
         sys.stdout.write(f"[full failed: {e}] ")
+    full_n_trials = sum(1 for r in trajectory if r["state"] == "COMPLETE")
 
     total_time = def_time + quick_time + full_time
     print(f"done ({total_time:.1f}s)")
@@ -266,25 +329,40 @@ def run_algo(algo_name, task, X_train, y_train, X_test, y_test, scoring):
         "quick_test": quick_test,
         "full_cv": full_cv,
         "full_test": full_test,
+        "full_n_trials": full_n_trials,
+        "quick_trials": QUICK_TRIALS,
+        "full_trials": FULL_TRIALS,
         "time_s": total_time,
-    }
+    }, trajectory
 
 
 # ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
 
-CSV_FIELDS = ["dataset", "task", "algorithm", "def_cv", "def_test", "quick_cv", "quick_test", "full_cv", "full_test", "time_s"]
+CSV_FIELDS = [
+    "dataset", "task", "algorithm", "def_cv", "def_test", "quick_cv", "quick_test",
+    "full_cv", "full_test", "full_n_trials", "quick_trials", "full_trials", "time_s",
+]
+TRIAL_FIELDS = ["dataset", "task", "algorithm", "trial", "state", "value", "best_so_far", "elapsed_s"]
 
 
-def save_csv(all_records, path):
-    """Write all benchmark records to a CSV file."""
+def save_csv(rows, path, fields=CSV_FIELDS):
+    """Write benchmark rows to a CSV file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(all_records)
-    print(f"\nResults saved to: {path}")
+        writer.writerows(rows)
+    print(f"Saved: {path}")
+
+
+def _run_dataset(task, ds_name, X_train, y_train, X_test, y_test, scoring, algo_names, all_records, all_trials):
+    for algo_name in algo_names:
+        record, trajectory = run_algo(algo_name, task, X_train, y_train, X_test, y_test, scoring)
+        tag = {"dataset": ds_name, "task": task, "algorithm": algo_name}
+        all_records.append({**record, **tag})
+        all_trials.extend({**row, **tag} for row in trajectory)
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +370,7 @@ def save_csv(all_records, path):
 # ---------------------------------------------------------------------------
 
 
-def run_classification_benchmark(all_records):
+def run_classification_benchmark(all_records, all_trials):
     """Run benchmark on classification datasets, appending records to all_records."""
     print("=" * 115)
     print("CLASSIFICATION BENCHMARK")
@@ -306,14 +384,11 @@ def run_classification_benchmark(all_records):
         print(f"\n--- {ds_name} (n={len(X)}, features={X.shape[1]}, classes={len(np.unique(y))}) ---")
         print(f"    Scoring: {scoring}, CV folds: {CV_FOLDS}, timeout: {PER_ALGO_TIMEOUT}s per run\n")
 
-        for algo_name in CLASSIFIER_NAMES:
-            record = run_algo(algo_name, "classification", X_train, y_train, X_test, y_test, scoring)
-            record["dataset"] = ds_name
-            record["task"] = "classification"
-            all_records.append(record)
+        _run_dataset("classification", ds_name, X_train, y_train, X_test, y_test, scoring,
+                     CLASSIFIER_NAMES, all_records, all_trials)
 
 
-def run_regression_benchmark(all_records):
+def run_regression_benchmark(all_records, all_trials):
     """Run benchmark on regression datasets, appending records to all_records."""
     print("\n" + "=" * 115)
     print("REGRESSION BENCHMARK")
@@ -327,19 +402,48 @@ def run_regression_benchmark(all_records):
         print(f"\n--- {ds_name} (n={len(X)}, features={X.shape[1]}) ---")
         print(f"    Scoring: {scoring}, CV folds: {CV_FOLDS}, timeout: {PER_ALGO_TIMEOUT}s per run\n")
 
-        for algo_name in REGRESSOR_NAMES:
-            record = run_algo(algo_name, "regression", X_train, y_train, X_test, y_test, scoring)
-            record["dataset"] = ds_name
-            record["task"] = "regression"
-            all_records.append(record)
+        _run_dataset("regression", ds_name, X_train, y_train, X_test, y_test, scoring,
+                     REGRESSOR_NAMES, all_records, all_trials)
+
+
+def _parse_args():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--datasets", nargs="+", help="subset of dataset names (default: all)")
+    ap.add_argument("--algorithms", nargs="+", help="subset of algorithm names (default: all supported)")
+    ap.add_argument("--quick-trials", type=int, default=QUICK_TRIALS)
+    ap.add_argument("--full-trials", type=int, default=FULL_TRIALS)
+    ap.add_argument("--output-dir", default=OUTPUT_DIR)
+    return ap.parse_args()
+
+
+def _apply_args(args):
+    global QUICK_TRIALS, FULL_TRIALS, OUTPUT_DIR, CLASSIFIER_NAMES, REGRESSOR_NAMES
+    global CLASSIFICATION_DATASETS, REGRESSION_DATASETS
+    QUICK_TRIALS, FULL_TRIALS, OUTPUT_DIR = args.quick_trials, args.full_trials, args.output_dir
+    if args.datasets:
+        known = set(CLASSIFICATION_DATASETS) | set(REGRESSION_DATASETS)
+        unknown = set(args.datasets) - known
+        if unknown:
+            sys.exit(f"Unknown dataset(s): {sorted(unknown)}; choose from {sorted(known)}")
+        CLASSIFICATION_DATASETS = {k: v for k, v in CLASSIFICATION_DATASETS.items() if k in args.datasets}
+        REGRESSION_DATASETS = {k: v for k, v in REGRESSION_DATASETS.items() if k in args.datasets}
+    if args.algorithms:
+        unknown = set(args.algorithms) - set(CLASSIFIER_NAMES) - set(REGRESSOR_NAMES)
+        if unknown:
+            sys.exit(f"Unknown or unavailable algorithm(s): {sorted(unknown)}")
+        CLASSIFIER_NAMES = [a for a in CLASSIFIER_NAMES if a in args.algorithms]
+        REGRESSOR_NAMES = [a for a in REGRESSOR_NAMES if a in args.algorithms]
 
 
 if __name__ == "__main__":
-    all_records = []
-    run_classification_benchmark(all_records)
-    run_regression_benchmark(all_records)
+    _apply_args(_parse_args())
+    all_records, all_trials = [], []
+    run_classification_benchmark(all_records, all_trials)
+    run_regression_benchmark(all_records, all_trials)
 
+    print()
     csv_path = os.path.join(OUTPUT_DIR, "benchmark_results.csv")
     save_csv(all_records, csv_path)
+    save_csv(all_trials, os.path.join(OUTPUT_DIR, "benchmark_trials.csv"), TRIAL_FIELDS)
     print("\nTo generate plots and markdown run:")
     print(f"  python benchmark/benchmark-plot.py {csv_path}")

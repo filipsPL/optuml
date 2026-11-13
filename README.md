@@ -427,6 +427,13 @@ predictions = pipe.predict(X_test)
 
 ### Algorithm Benchmarking
 
+**tl;dr** benchmarks on the standard classification and regression datasets (iris, wine, cancer) show that optimization of hyperparameters is beneficial for many (but not all!) algorithms:
+
+![held-out test gain, algorithm × dataset](benchmark/results/gain_heatmap.png)
+
+**Fig.** Benefits of OptuML - performance change on a held-out test, algorithm × dataset
+
+
 `AlgorithmBenchmark` runs every supported algorithm (or a chosen subset) on your data, optimizes each one independently, and reports a ranked comparison — without any scikit-learn estimator constraints. Check [sample script](examples/example-benchmark-all.py) and [outputs](examples/benchmark_results/).
 
 ```python

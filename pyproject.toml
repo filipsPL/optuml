@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optuml"
-version = "0.2.7"
+version = "0.2.8"
 description = "Hyperparameter optimization for multiple machine learning algorithms using Optuna, with Scikit-learn API"
 readme = "README.md"
 requires-python = ">=3.10"

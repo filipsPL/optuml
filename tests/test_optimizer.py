@@ -664,6 +664,34 @@ def test_benchmark_include_dummy_false(classification_data):
     assert len(bench.results_) == len(_BENCHMARK_CLASSIFIERS)
 
 
+def _folds(cv, X, y):
+    return [(tr.tolist(), te.tolist()) for tr, te in cv.split(X, y)]
+
+
+@pytest.mark.parametrize("random_state", [None, 7])
+def test_benchmark_shares_folds_across_algorithms_and_dummy(classification_data, random_state):
+    """Every algorithm and the dummy are scored on identical folds, even without a seed."""
+    from sklearn.dummy import DummyClassifier
+    from sklearn.model_selection import cross_val_score
+
+    X_train, _, y_train, _ = classification_data
+    bench = AlgorithmBenchmark(
+        task="classification",
+        algorithms=_BENCHMARK_CLASSIFIERS,
+        n_trials=2,
+        random_state=random_state,
+    ).fit(X_train, y_train)
+
+    reference = _folds(bench.cv_, X_train, y_train)
+    for opt in bench.optimizers_.values():
+        assert _folds(opt._optimizer._make_cv(), X_train, y_train) == reference
+
+    expected_dummy = cross_val_score(
+        DummyClassifier(strategy="most_frequent"), X_train, y_train, cv=bench.cv_, scoring="accuracy"
+    ).mean()
+    assert bench.dummy_score_ == pytest.approx(expected_dummy)
+
+
 # ---------------------------------------------------------------------------
 # Feature scaling (#3)
 # ---------------------------------------------------------------------------
@@ -908,6 +936,33 @@ def test_svc_probability_policy(classification_data_binary):
     X_train, X_test, y_train, _ = classification_data_binary
     opt = Optimizer(algorithm="SVC", n_trials=2, random_state=0).fit(X_train, y_train)
     assert opt.predict_proba(X_test).shape == (len(X_test), 2)
+
+
+def test_needs_proba_recognises_scorer_objects():
+    from sklearn.metrics import make_scorer, roc_auc_score, accuracy_score, log_loss
+    from optuml.optuml import ClassifierOptimizer
+
+    def needs(scoring):
+        return ClassifierOptimizer(algorithm="SVC", scoring=scoring)._needs_proba()
+
+    assert needs(None) is False
+    assert needs("neg_log_loss") is True
+    assert needs(make_scorer(roc_auc_score, response_method="predict_proba")) is True
+    assert needs(make_scorer(log_loss, response_method="predict_proba", greater_is_better=False)) is True
+    assert needs(make_scorer(accuracy_score)) is False
+    # Opaque callable: response method unknown -> be safe and enable probabilities.
+    assert needs(lambda est, X, y: 0.0) is True
+
+
+def test_svc_with_custom_proba_scorer_completes(classification_data_binary):
+    """A make_scorer(..., response_method='predict_proba') must not make SVC trials fail."""
+    from sklearn.metrics import make_scorer, roc_auc_score
+
+    X_train, _, y_train, _ = classification_data_binary
+    scorer = make_scorer(roc_auc_score, response_method="predict_proba")
+    opt = Optimizer(algorithm="SVC", scoring=scorer, n_trials=3, cv=3, random_state=0).fit(X_train, y_train)
+    assert opt.n_trials_completed_ == 3
+    assert 0.5 < opt.best_score_ <= 1.0
 
 
 def test_cv_std_recorded(classification_data):

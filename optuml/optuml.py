@@ -666,7 +666,12 @@ class OptimizerBase(BaseEstimator):
         scoring : str or None, default=None
             Scoring method for cross-validation
         cv_timeout : float, default=120
-            Timeout for a single CV evaluation (seconds)
+            Soft timeout for a single CV evaluation (seconds). When it fires the
+            trial is pruned and control returns immediately, but the CV work cannot
+            be killed (Python threads are not cancellable): it keeps running in a
+            background thread until it finishes, consuming CPU/memory. Repeated
+            timeouts can therefore pile up concurrent background jobs and slow
+            later trials. Set it generously and treat it as a guard, not a hard limit.
         random_state : int or None, default=None
             Random state for reproducibility
         early_stopping_patience : int or None, default=None
@@ -1044,10 +1049,29 @@ class ClassifierOptimizer(ClassifierMixin, OptimizerBase):
         super().__init__(algorithm=algorithm, scoring=scoring, **kwargs)
 
     def _needs_proba(self):
-        """True when the scoring metric needs probabilities (SVC then needs probability=True)."""
-        return isinstance(self.scoring, str) and any(
-            k in self.scoring for k in ("roc_auc", "log_loss", "average_precision", "brier")
-        )
+        """True when the scoring may call ``predict_proba`` (SVC then needs probability=True).
+
+        Strings and scorer objects are resolved through ``get_scorer`` and their
+        ``_response_method`` is inspected (sklearn >= 1.4), so custom
+        ``make_scorer(..., response_method="predict_proba")`` scorers are recognised.
+        A callable whose response method cannot be determined is treated as needing
+        probabilities: slower SVC trials, but never a failure at scoring time.
+        """
+        if self.scoring is None:
+            return False
+        from sklearn.metrics import get_scorer
+
+        try:
+            scorer = get_scorer(self.scoring)
+        except (ValueError, TypeError):
+            return not isinstance(self.scoring, str)
+        method = getattr(scorer, "_response_method", None)
+        if method is None:
+            if isinstance(self.scoring, str):  # sklearn < 1.4: fall back to name matching
+                return any(k in self.scoring for k in ("roc_auc", "log_loss", "average_precision", "brier"))
+            return True
+        methods = (method,) if isinstance(method, str) else tuple(method)
+        return "predict_proba" in methods
 
     def _objective(self, trial, X, y):
         """Objective function for Optuna optimization"""
@@ -2268,7 +2292,9 @@ class Optimizer(BaseEstimator):
         scoring : str or None, default=None
             Scoring method (defaults to 'accuracy' for classifiers, 'r2' for regressors)
         cv_timeout : float, default=120
-            Timeout for single CV evaluation
+            Soft timeout for a single CV evaluation (seconds): the trial is pruned
+            and control returns, but the timed-out CV keeps running in a background
+            thread until it finishes (threads cannot be killed).
         random_state : int or None, default=None
             Random state for reproducibility
         early_stopping_patience : int or None, default=None
@@ -2483,15 +2509,30 @@ class AlgorithmBenchmark:
         Number of Optuna trials per algorithm.
     timeout : float or None, default None
         Per-algorithm wall-clock timeout for the Optuna study (seconds).
-    cv : int, default 5
-        Cross-validation folds.
+    cv : int or cross-validation splitter, default 5
+        Cross-validation folds.  An int builds **one** shuffled splitter in
+        ``fit()`` (seeded with ``random_state``, or a seed drawn once per fit when
+        ``random_state`` is None) that is shared by every algorithm and the dummy
+        baseline, so all are scored on identical folds.  It is exposed as
+        ``cv_``.  A splitter object is used as-is; give it a fixed
+        ``random_state`` if it shuffles, otherwise folds will differ.
     scoring : str or None, default None
         Scoring metric.  Defaults to ``"accuracy"`` for classification and
         ``"r2"`` for regression when ``None``.
     cv_timeout : float, default 120
-        Timeout for a single CV evaluation (seconds).
+        Soft timeout for a single CV evaluation (seconds); see ``Optimizer``.
+        Timed-out CV work keeps running in a background thread.
     random_state : int or None, default None
         Random state passed to every Optimizer.
+
+    Notes
+    -----
+    The ranking is **exploratory**.  ``best_score`` per algorithm is the best
+    inner-CV score over its trials, i.e. selected on the same folds it is reported
+    on, so it is optimistically biased.  The bias is not uniform: algorithms with
+    larger search spaces or more trials gain more, while parameter-free models
+    (e.g. ``LinearRegression``, 1 trial) gain none.  For an unbiased comparison of
+    finalists, call ``nested_score()`` on the relevant entries of ``optimizers_``.
     early_stopping_patience : int or None, default None
         Early stopping patience passed to every Optimizer.
     n_jobs : int, default 1
@@ -2572,7 +2613,7 @@ class AlgorithmBenchmark:
     def _run_dummy(self, X, y):
         """Evaluate the dummy baseline via cross-validation (no Optuna)."""
         import time as _time
-        from sklearn.model_selection import cross_val_score, StratifiedKFold, KFold
+        from sklearn.model_selection import cross_val_score
 
         if self.task == "classification":
             from sklearn.dummy import DummyClassifier
@@ -2584,13 +2625,8 @@ class AlgorithmBenchmark:
             dummy = DummyRegressor(strategy="mean")
             label = "DummyRegressor(mean)"
 
-        # Use the same shuffled, seeded splitter the Optimizers use, so the dummy is
-        # scored on identical folds. A splitter object passed as cv is used as-is.
-        if isinstance(self.cv, int):
-            splitter_cls = StratifiedKFold if self.task == "classification" else KFold
-            cv = splitter_cls(n_splits=self.cv, shuffle=True, random_state=self.random_state)
-        else:
-            cv = self.cv
+        # The shared splitter built in fit(), so the dummy sees the Optimizers' folds.
+        cv = self._shared_cv()
 
         scoring = self.scoring or ("accuracy" if self.task == "classification" else "r2")
         t0 = _time.monotonic()
@@ -2624,6 +2660,31 @@ class AlgorithmBenchmark:
                 "_is_dummy": True,
             }
 
+    def _make_shared_cv(self):
+        """Build the single splitter every algorithm and the dummy are scored on.
+
+        An int ``cv`` becomes a shuffled StratifiedKFold/KFold with a fixed integer
+        seed (``random_state``, or one drawn now when it is None). A splitter with an
+        integer seed yields identical folds on every ``split()`` call, so passing the
+        same object to every Optimizer aligns their folds without also pinning the
+        Optuna sampler seeds. A splitter object passed as ``cv`` is used as-is.
+        """
+        from sklearn.model_selection import StratifiedKFold, KFold
+
+        if not isinstance(self.cv, int):
+            return self.cv
+        seed = self.random_state
+        if seed is None:
+            seed = int(np.random.randint(0, 2**31 - 1))
+        splitter_cls = StratifiedKFold if self.task == "classification" else KFold
+        return splitter_cls(n_splits=self.cv, shuffle=True, random_state=seed)
+
+    def _shared_cv(self):
+        """The splitter for this fit (built lazily if _run_* is called directly)."""
+        if not hasattr(self, "cv_"):
+            self.cv_ = self._make_shared_cv()
+        return self.cv_
+
     def _run_one(self, algorithm, X, y):
         """Fit a single Optimizer and return a result dict."""
         import time as _time
@@ -2633,7 +2694,7 @@ class AlgorithmBenchmark:
             verbose=self.verbose,
             n_trials=self.n_trials,
             timeout=self.timeout,
-            cv=self.cv,
+            cv=self._shared_cv(),
             scoring=self.scoring,
             cv_timeout=self.cv_timeout,
             random_state=self.random_state,
@@ -2680,6 +2741,10 @@ class AlgorithmBenchmark:
         self
         """
         from joblib import Parallel, delayed
+
+        # One splitter for the whole benchmark, built before the (possibly
+        # process-parallel) runs so every worker receives the same seeded object.
+        self.cv_ = self._make_shared_cv()
 
         results = Parallel(n_jobs=self.n_jobs_algorithms)(
             delayed(self._run_one)(alg, X, y) for alg in self.algorithms

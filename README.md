@@ -381,6 +381,8 @@ optimizer = Optimizer(
 )
 ```
 
+> **`cv_timeout` is a soft timeout.** When it fires, the trial is pruned and the search moves on immediately, but the CV work cannot be killed (Python threads are not cancellable) and keeps running in the background until it finishes. Repeated timeouts can pile up concurrent background jobs that slow down later trials, so set it generously and treat it as a safety guard rather than a hard limit.
+
 ### Access to Optuna Study
 
 Get detailed optimization information:
@@ -460,6 +462,15 @@ rf_optimizer = bench.optimizers_["RandomForestClassifier"]
 print(rf_optimizer.best_params_)
 ```
 
+All algorithms and the dummy baseline are scored on **the same CV folds**: with an int `cv`, one shuffled splitter is built per `fit()` (seeded by `random_state`, or a seed drawn once when it is `None`) and shared by every run; it is exposed as `bench.cv_`.
+
+> **The ranking is exploratory.** Each algorithm's `best_score` is the best of its trials on the same folds it is reported on, so it is optimistically biased, and not uniformly: algorithms with larger search spaces gain more than parameter-free ones (e.g. `LinearRegression`, 1 trial). To compare finalists without bias, use [`nested_score()`](#unbiased-evaluation-nested-cross-validation):
+>
+> ```python
+> for name in bench.summary()["algorithm"][:3]:          # top-3 finalists
+>     print(name, bench.optimizers_[name].nested_score(X_train, y_train).mean())
+> ```
+
 To benchmark a specific subset of algorithms:
 
 ```python
@@ -490,9 +501,9 @@ bench = AlgorithmBenchmark(
 | `algorithms`              | list or `"all"`| `"all"`      | Algorithms to benchmark                             |
 | `n_trials`                | int            | 50           | Optuna trials per algorithm                         |
 | `timeout`                 | float/None     | None         | Per-algorithm study timeout (seconds)               |
-| `cv`                      | int            | 5            | Cross-validation folds                              |
+| `cv`                      | int/splitter   | 5            | CV folds, shared by all algorithms (see `cv_`)      |
 | `scoring`                 | str/None       | Auto*        | Scoring metric                                      |
-| `cv_timeout`              | float          | 120          | Per-trial CV timeout (seconds)                      |
+| `cv_timeout`              | float          | 120          | Per-trial *soft* CV timeout (seconds)               |
 | `random_state`            | int/None       | None         | Random seed forwarded to every `Optimizer`          |
 | `early_stopping_patience` | int/None       | None         | Early stopping patience per algorithm               |
 | `n_jobs`                  | int            | 1            | Parallel CV jobs inside each `Optimizer`            |
@@ -562,7 +573,7 @@ Specialized optimizer for regression algorithms with appropriate default scoring
 | `scale`                   | bool or "auto" | "auto"     | Standardize scale-sensitive algorithms**          |
 | `direction`               | str            | "maximize" | Optimization direction (keep "maximize"***)       |
 | `timeout`                 | float/None     | None       | Total optimization timeout (seconds)              |
-| `cv_timeout`              | float          | 120        | Single CV evaluation timeout                      |
+| `cv_timeout`              | float          | 120        | Single CV evaluation *soft* timeout               |
 | `random_state`            | int/None       | None       | Random seed for reproducibility                   |
 | `n_jobs`                  | int            | 1          | Parallel jobs for CV (-1 for all cores)           |
 | `early_stopping_patience` | int/None       | None       | Trials without improvement before stopping        |
